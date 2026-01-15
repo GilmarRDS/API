@@ -1,0 +1,28 @@
+# Byte-compiled / otimização do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ambientes Virtuais (se você usar venv)
+venv/
+env/
+.env
+.venv
+# --- SEGURANÇA STREAMLIT (CRÍTICO) ---
+# Ignora o arquivo que contém sua chave privada do Google
+.streamlit/secrets.toml
+.streamlit
+
+# --- Arquivos de Dados Locais ---
+# Ignora planilhas geradas ou bancos de dados locais antigos
+*.xlsx
+*.xls
+*.csv
+
+# Logs e arquivos de sistema
+*.log
+.DS_Store
+
+# Configurações de IDE (VS Code, Pycharm)
+.vscode/
+.idea/
