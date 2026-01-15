@@ -4,6 +4,7 @@ import pandas as pd
 import random
 import io
 import xlsxwriter
+import time
 from datetime import datetime
 
 # ==========================================
@@ -23,7 +24,7 @@ MATERIAS_ESPECIALISTAS = [
 REGIOES_DISPONIVEIS = ["Fundão", "Praia Grande"]
 
 # ==========================================
-# 2. BANCO DE DADOS
+# 2. BANCO DE DADOS (BLINDADO)
 # ==========================================
 
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -31,14 +32,30 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def definir_hora_atual():
     st.session_state['hora_exata_db'] = datetime.now().strftime("%d/%m/%Y às %H:%M:%S")
 
+def ler_planilha_segura(aba):
+    tentativas = 0
+    max_tentativas = 5
+    while tentativas < max_tentativas:
+        try:
+            return conn.read(worksheet=aba, ttl=5) 
+        except Exception as e:
+            erro = str(e)
+            if "429" in erro or "Quota exceeded" in erro:
+                tentativas += 1
+                tempo_espera = 2 * tentativas
+                st.toast(f"⏳ Google ocupado. Aguardando {tempo_espera}s...", icon="⚠️")
+                time.sleep(tempo_espera)
+            else:
+                raise e 
+    return pd.DataFrame() 
+
 def carregar_dados():
     try:
-        df_turmas = conn.read(worksheet="Turmas", ttl=0)
-        df_curriculo = conn.read(worksheet="Curriculo", ttl=0)
-        df_professores = conn.read(worksheet="Professores", ttl=0)
-        df_dias = conn.read(worksheet="ConfigDias", ttl=0)
+        df_turmas = ler_planilha_segura("Turmas")
+        df_curriculo = ler_planilha_segura("Curriculo")
+        df_professores = ler_planilha_segura("Professores")
+        df_dias = ler_planilha_segura("ConfigDias")
         
-        # Estruturas
         if df_turmas.empty: df_turmas = pd.DataFrame(columns=["Escola", "Nivel", "NomeTurma", "Turno", "AnoBase", "Regiao"])
         if df_curriculo.empty: df_curriculo = pd.DataFrame(columns=["AnoBase", "Materia", "Quantidade"])
         if df_professores.empty: df_professores = pd.DataFrame(columns=["Codigo", "Nome", "Componentes", "CH_Aulas", "Qtd_PL", "Escolas", "Regiao"])
@@ -52,7 +69,7 @@ def carregar_dados():
         return df_turmas, df_curriculo, df_professores, df_dias
 
     except Exception as e:
-        st.error(f"Erro na conexão: {e}")
+        st.error(f"Erro ao carregar dados: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def salvar_geral(df_t, df_c, df_p, df_d):
@@ -64,13 +81,18 @@ def salvar_geral(df_t, df_c, df_p, df_d):
             conn.update(worksheet="ConfigDias", data=df_d)
             st.cache_data.clear()
             definir_hora_atual() 
-            
+            st.success("✅ Salvo com sucesso!")
+            time.sleep(1)
+            st.rerun()
     except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
+        if "429" in str(e):
+            st.error("O Google bloqueou temporariamente. Espere 1 minuto.")
+        else:
+            st.error(f"Erro ao salvar: {e}")
 
-# --- CRUD ---
+# --- CRUD RAPIDO ---
 
-def adicionar_turma(dado):
+def adicionar_turma_rapido(dado):
     dt, dc, dp, dd = carregar_dados()
     dt = pd.concat([dt, pd.DataFrame([dado])], ignore_index=True)
     salvar_geral(dt, dc, dp, dd)
@@ -84,20 +106,13 @@ def salvar_curriculo_completo(ano, dia_semana, dict_quantidades):
     if novas: dc = pd.concat([dc, pd.DataFrame(novas)], ignore_index=True)
     salvar_geral(dt, dc, dp, dd)
 
-def adicionar_professor(dado):
+def adicionar_professor_rapido(dado):
     dt, dc, dp, dd = carregar_dados()
     dp = pd.concat([dp, pd.DataFrame([dado])], ignore_index=True)
     salvar_geral(dt, dc, dp, dd)
 
-def limpar_tabela(aba):
-    dt, dc, dp, dd = carregar_dados()
-    if aba == 'Turmas': dt = dt.iloc[0:0]
-    if aba == 'Professores': dp = dp.iloc[0:0]
-    if aba == 'ConfigDias': dd = dd.iloc[0:0]
-    salvar_geral(dt, dc, dp, dd)
-
 # ==========================================
-# 3. ALGORITMO DE ALOCAÇÃO
+# 3. ALGORITMO
 # ==========================================
 
 def normalizar_texto(texto):
@@ -128,7 +143,6 @@ def carregar_objetos_professores(df_prof):
     return lista_profs
 
 def resolver_horario_grade(turmas_do_dia, curriculo_df, lista_professores):
-    # Reset
     for p in lista_professores:
         p['horarios_ocupados'] = []
 
@@ -171,10 +185,8 @@ def resolver_horario_grade(turmas_do_dia, curriculo_df, lista_professores):
             turma_obj = aula_info['turma']
             materia = aula_info['materia']
             nome_turma = turma_obj['nome_turma']
-            
             escola_norm = normalizar_texto(turma_obj['escola_real'])
             regiao_turma = turma_obj['regiao_real']
-
             alocado = False
             
             slots_livres_turma = [i for i, val in enumerate(grade_tentativa[nome_turma]) if val is None]
@@ -197,7 +209,6 @@ def resolver_horario_grade(turmas_do_dia, curriculo_df, lista_professores):
                             if p['aulas_atribuidas'] >= p['max_aulas']: ok = False; motivo.append("CH Max")
                             if p['regiao'] and p['regiao'] != regiao_turma: ok = False; motivo.append(f"Região")
                             if ok and escola_norm not in p['escolas_norm']: ok = False; motivo.append("Escola")
-                            
                             if ok: candidatos.append(p)
                             if tentativa == (MAX_TENTATIVAS - 1):
                                 analise_professores.append(f"{p['nome']}: {','.join(motivo)}")
@@ -216,87 +227,53 @@ def resolver_horario_grade(turmas_do_dia, curriculo_df, lista_professores):
                     motivo_falha_atual = f"Falha '{materia}' em '{nome_turma}'.\n{ '; '.join(analise_professores[:3]) }"
                 break 
         
-        if sucesso_tentativa:
-            return grade_tentativa, None
-        
-        if tentativa == (MAX_TENTATIVAS - 1):
-            return None, motivo_falha_atual
+        if sucesso_tentativa: return grade_tentativa, None
+        if tentativa == (MAX_TENTATIVAS - 1): return None, motivo_falha_atual
 
     return None, "Impossível matematicamente."
 
-# --- FORMATAÇÃO VISUAL BONITA (POR ESCOLA) ---
+# --- VISUAL PREVIEW ---
+def criar_preview_com_recreio(df_dados):
+    df = df_dados.copy()
+    top = df.iloc[:3]
+    bottom = df.iloc[3:]
+    recreio = pd.DataFrame([["RECREIO"] * len(df.columns)], columns=df.columns)
+    df_final = pd.concat([top, recreio, bottom]).reset_index(drop=True)
+    df_final.index = ["1ª Aula", "2ª Aula", "3ª Aula", "RECREIO", "4ª Aula", "5ª Aula"]
+    return df_final
+
+# --- VISUAL EXCEL ---
 def desenhar_tabela_escola(writer, nome_escola, dados_turnos):
-    """
-    Desenha uma aba inteira para a escola, empilhando os turnos/dias.
-    dados_turnos = lista de tuplas (Titulo_Bloco, DataFrame)
-    """
-    # Cria a aba com nome limpo (max 31 chars)
     sheet_name = nome_escola[:30].replace("/","-")
     workbook = writer.book
     worksheet = workbook.add_worksheet(sheet_name)
     writer.sheets[sheet_name] = worksheet
     
-    # --- ESTILOS PROFISSIONAIS ---
-    # Azul Escuro para Título da Escola
-    fmt_titulo_escola = workbook.add_format({
-        'bold': True, 'align': 'center', 'valign': 'vcenter',
-        'font_size': 18, 'bg_color': '#4472C4', 'font_color': 'white', 'border': 1
-    })
-    
-    # Azul Claro para Subtítulos (Turno/Dia)
-    fmt_subtitulo = workbook.add_format({
-        'bold': True, 'align': 'center', 'valign': 'vcenter',
-        'font_size': 12, 'bg_color': '#D9E1F2', 'border': 1
-    })
-    
-    # Cabeçalho das Turmas (Verde suave)
-    fmt_header_turma = workbook.add_format({
-        'bold': True, 'align': 'center', 'valign': 'vcenter',
-        'text_wrap': True, 'bg_color': '#E2EFDA', 'border': 1
-    })
-    
-    # Célula Normal (Centralizada com quebra)
-    fmt_celula = workbook.add_format({
-        'align': 'center', 'valign': 'vcenter',
-        'text_wrap': True, 'border': 1, 'font_size': 10
-    })
-    
-    # Recreio (Cinza)
-    fmt_recreio = workbook.add_format({
-        'bold': True, 'align': 'center', 'valign': 'vcenter',
-        'bg_color': '#F2F2F2', 'font_color': '#595959', 'border': 1
-    })
+    fmt_titulo_escola = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'font_size': 18, 'bg_color': '#4472C4', 'font_color': 'white', 'border': 1})
+    fmt_subtitulo = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'font_size': 12, 'bg_color': '#D9E1F2', 'border': 1})
+    fmt_header_turma = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'text_wrap': True, 'bg_color': '#E2EFDA', 'border': 1})
+    fmt_celula = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'text_wrap': True, 'border': 1, 'font_size': 10})
+    fmt_recreio = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'font_color': '#595959', 'border': 1})
 
-    # --- DESENHO ---
     current_row = 0
-    
-    # 1. Título da Escola no Topo
     worksheet.merge_range(current_row, 0, current_row, 5, nome_escola, fmt_titulo_escola)
-    current_row += 2 # Pula linha
+    current_row += 2 
     
     for titulo_bloco, df_grade in dados_turnos:
         if df_grade.empty: continue
-        
-        # Converte dicionário para DF se necessário
-        if isinstance(df_grade, dict):
-            df = pd.DataFrame(df_grade)
-        else:
-            df = df_grade
+        if isinstance(df_grade, dict): df = pd.DataFrame(df_grade)
+        else: df = df_grade
             
         num_cols = len(df.columns)
-        
-        # Título do Bloco (Ex: "MATUTINO - SEGUNDA-FEIRA")
         worksheet.merge_range(current_row, 0, current_row, num_cols, titulo_bloco, fmt_subtitulo)
         current_row += 1
         
-        # Cabeçalhos das Turmas
         worksheet.write(current_row, 0, "Horário", fmt_header_turma)
         for col_idx, col_name in enumerate(df.columns):
             worksheet.write(current_row, col_idx + 1, col_name, fmt_header_turma)
-            worksheet.set_column(col_idx + 1, col_idx + 1, 22) # Largura
+            worksheet.set_column(col_idx + 1, col_idx + 1, 22) 
         current_row += 1
         
-        # Aulas 1 a 3
         for i in range(3):
             worksheet.write(current_row, 0, f"{i+1}ª Aula", fmt_celula)
             for col_idx, col_name in enumerate(df.columns):
@@ -305,11 +282,9 @@ def desenhar_tabela_escola(writer, nome_escola, dados_turnos):
                 worksheet.write(current_row, col_idx + 1, val, fmt_celula)
             current_row += 1
             
-        # RECREIO
         worksheet.merge_range(current_row, 0, current_row, num_cols, "RECREIO", fmt_recreio)
         current_row += 1
         
-        # Aulas 4 e 5
         for i in range(3, 5):
             worksheet.write(current_row, 0, f"{i+1}ª Aula", fmt_celula)
             for col_idx, col_name in enumerate(df.columns):
@@ -318,11 +293,16 @@ def desenhar_tabela_escola(writer, nome_escola, dados_turnos):
                 worksheet.write(current_row, col_idx + 1, val, fmt_celula)
             current_row += 1
             
-        # Espaço entre blocos
         current_row += 2
-        
-    # Ajuste final da coluna A
     worksheet.set_column(0, 0, 12)
+
+# --- FUNÇÃO DE NORMALIZAÇÃO PARA O PAINEL DE VAGAS ---
+def normalizar_nome_materia(nome):
+    """Converte 'Arte (Infantil)' em 'Arte', etc."""
+    nome_lower = nome.lower()
+    if "arte" in nome_lower: return "Arte"
+    if "física" in nome_lower or "fisica" in nome_lower: return "Educação Física"
+    return nome # Retorna o nome original se não for desses dois
 
 # ==========================================
 # 4. INTERFACE GRÁFICA
@@ -351,10 +331,158 @@ if st.sidebar.button("🔄 Forçar Atualização"):
 st.sidebar.divider()
 st.sidebar.caption("Infantil = Creche/Pré | Fund. = Fundamental")
 
-# --- ABAS ---
-t1, t2, t3, t4 = st.tabs(["1. Configuração", "2. Turmas", "3. Professores", "4. Gerar Grade"])
+# --- ABAS REORGANIZADAS (VAGAS É A PRIMEIRA) ---
+t1, t2, t3, t4, t5 = st.tabs(["1. 📊 Quadro de Vagas", "2. Configuração", "3. Turmas", "4. Professores", "5. Gerar Grade"])
 
+# --- ABA 1: QUADRO DE VAGAS UNIFICADO E FILTRADO ---
 with t1:
+    st.header("📊 Painel de Vagas e Alertas")
+    
+    if dt.empty or dc.empty:
+        st.warning("Cadastre Turmas e Curículo primeiro.")
+    else:
+        # --- FILTROS NO TOPO ---
+        c_filt1, c_filt2 = st.columns(2)
+        
+        # Filtro de Escola
+        lista_escolas = sorted(dt['Escola'].unique().tolist())
+        opcoes_filtro = ["Rede Completa"] + lista_escolas
+        filtro_escola = c_filt1.selectbox("Filtrar por Escola:", opcoes_filtro)
+        
+        # Filtro de Matéria (Componente)
+        # Cria lista de materias unificadas para o filtro
+        materias_unificadas_filtro = sorted(list(set([normalizar_nome_materia(m) for m in MATERIAS_ESPECIALISTAS])))
+        filtro_componente = c_filt2.multiselect("Filtrar por Componente:", materias_unificadas_filtro)
+
+        # 1. CÁLCULO DA DEMANDA (UNIFICADA)
+        demanda_total = {} 
+        if filtro_escola == "Rede Completa": turmas_alvo = dt
+        else: turmas_alvo = dt[dt['Escola'] == filtro_escola]
+
+        for _, row_turma in turmas_alvo.iterrows():
+            ano_turma = row_turma['AnoBase']
+            curriculo_ano = dc[dc['AnoBase'] == ano_turma]
+            for _, row_curr in curriculo_ano.iterrows():
+                mat_orig = row_curr['Materia']
+                qtd = int(row_curr['Quantidade'])
+                
+                # UNIFICAÇÃO AQUI
+                mat_unificada = normalizar_nome_materia(mat_orig)
+                
+                if mat_unificada in demanda_total: demanda_total[mat_unificada] += qtd
+                else: demanda_total[mat_unificada] = qtd
+        
+        # 2. CÁLCULO DA OFERTA (UNIFICADA)
+        oferta_total = {}
+        if not dp.empty:
+            for _, row_prof in dp.iterrows():
+                atende_escola = True
+                if filtro_escola != "Rede Completa":
+                    escolas_do_prof = str(row_prof['Escolas'])
+                    if filtro_escola not in escolas_do_prof: atende_escola = False
+                
+                if atende_escola:
+                    try: ch = int(row_prof['CH_Aulas'])
+                    except: ch = 0
+                    mats_prof = [m.strip() for m in str(row_prof['Componentes']).split(',')]
+                    
+                    # Evita somar a CH do mesmo professor duas vezes se ele dá "Arte Inf" e "Arte Fund"
+                    materias_unificadas_professor = set()
+                    for m in mats_prof:
+                        if m in MATERIAS_ESPECIALISTAS:
+                            materias_unificadas_professor.add(normalizar_nome_materia(m))
+                    
+                    for m_unif in materias_unificadas_professor:
+                        if m_unif not in oferta_total: oferta_total[m_unif] = 0
+                        oferta_total[m_unif] += ch
+
+        # FILTRAGEM FINAL DOS DADOS PARA EXIBIÇÃO
+        # Se usuário selecionou componentes, filtra aqui
+        materias_para_exibir = materias_unificadas_filtro
+        if filtro_componente:
+            materias_para_exibir = filtro_componente
+
+        # TOTAIS GERAIS (DA SELEÇÃO ATUAL)
+        soma_nec = 0
+        soma_oferta = 0
+        for m in materias_para_exibir:
+            soma_nec += demanda_total.get(m, 0)
+            soma_oferta += oferta_total.get(m, 0)
+        
+        saldo_geral = soma_oferta - soma_nec
+
+        # --- PAINEL DE MÉTRICAS ---
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Aulas Necessárias", soma_nec)
+        col_m2.metric("Aulas Cadastradas", soma_oferta)
+        col_m3.metric("Saldo de Aulas", saldo_geral, delta_color="normal")
+        
+        st.markdown("---")
+        
+        # --- ALERTA DETETIVE ---
+        st.subheader("📍 Alertas de Escolas")
+        alertas_encontrados = False
+        escolas_para_checar = lista_escolas if filtro_escola == "Rede Completa" else [filtro_escola]
+        
+        for esc in escolas_para_checar:
+            turmas_da_escola = dt[dt['Escola'] == esc]
+            if turmas_da_escola.empty: continue
+            
+            necessidade_escola = set()
+            for _, t in turmas_da_escola.iterrows():
+                cur_t = dc[dc['AnoBase'] == t['AnoBase']]
+                for _, c in cur_t.iterrows():
+                    if int(c['Quantidade']) > 0: 
+                        # Adiciona a necessidade UNIFICADA
+                        necessidade_escola.add(normalizar_nome_materia(c['Materia']))
+            
+            professores_na_escola = dp[dp['Escolas'].str.contains(esc, na=False, regex=False)]
+            
+            for materia_nec_unif in necessidade_escola:
+                # Se filtrou componente e este não está na lista, pula
+                if filtro_componente and materia_nec_unif not in filtro_componente: continue
+
+                tem_prof = False
+                for _, p in professores_na_escola.iterrows():
+                    # Verifica se o professor dá alguma matéria que normaliza para a necessidade
+                    comps_prof = [m.strip() for m in str(p['Componentes']).split(',')]
+                    for cp in comps_prof:
+                        if normalizar_nome_materia(cp) == materia_nec_unif:
+                            tem_prof = True
+                            break
+                    if tem_prof: break
+                
+                if not tem_prof:
+                    alertas_encontrados = True
+                    st.error(f"⚠️ **{esc}**: NENHUM professor de **{materia_nec_unif}** cadastrado!")
+
+        if not alertas_encontrados: st.success("✅ Cobertura OK para os filtros selecionados.")
+        st.markdown("---")
+
+        col_calc, col_res = st.columns([1, 2])
+        with col_calc:
+            st.subheader("🧮 Calculadora")
+            aulas_contrato = st.number_input("Média de aulas por contrato:", min_value=1, value=20) 
+
+        with col_res:
+            dados_tabela = []
+            for mat in materias_para_exibir:
+                qtd_aulas = demanda_total.get(mat, 0)
+                # Mostra mesmo se for 0, se foi filtrado
+                professores_necessarios = qtd_aulas / aulas_contrato
+                ch_disponivel = oferta_total.get(mat, 0)
+                saldo_aulas = ch_disponivel - qtd_aulas
+                status = "✅ OK"
+                if saldo_aulas < 0: status = f"❌ Faltam {abs(saldo_aulas)}"
+                else: status = f"🔵 Sobram {saldo_aulas}"
+                dados_tabela.append({"Matéria": mat, "Demanda": qtd_aulas, "Contratos Nec.": f"{professores_necessarios:.1f}", "CH Oferta": ch_disponivel, "Situação": status})
+            
+            if dados_tabela:
+                df_vagas = pd.DataFrame(dados_tabela)
+                st.dataframe(df_vagas, use_container_width=True)
+
+# --- ABA 2: CONFIGURAÇÃO ---
+with t2:
     st.markdown("### Configuração por Ano/Série")
     ano_sel = st.selectbox("Ano:", ["Berçário", "Creche I", "Creche II", "Creche III", "Pré I", "Pré II", "1º Ano", "2º Ano", "3º Ano", "4º Ano", "5º Ano"])
     dia_atual = "Segunda-feira"
@@ -377,111 +505,104 @@ with t1:
             i+=1
         if st.form_submit_button("💾 Salvar Configuração"):
             salvar_curriculo_completo(ano_sel, dia_sel, qts)
-            st.success(f"Salvo!")
-            st.rerun()
 
-with t2:
-    st.markdown("### Cadastro de Turmas")
-    with st.form("nova_turma"):
-        c1, c2 = st.columns(2)
-        esc = c1.text_input("Escola")
-        tnm = c2.text_input("Turma (Ex: A)")
-        c3, c4, c5 = st.columns(3)
-        trn = c3.selectbox("Turno", ["Matutino", "Vespertino"])
-        regiao = c4.selectbox("Região", REGIOES_DISPONIVEIS)
-        ano = c5.selectbox("Ano Base", ["Berçário", "Creche I", "Creche II", "Creche III", "Pré I", "Pré II", "1º Ano", "2º Ano", "3º Ano", "4º Ano", "5º Ano"])
-        if st.form_submit_button("➕ Adicionar Turma"):
-            if not esc or not tnm: st.error("Preencha Escola e Turma!")
-            else:
-                if any(x in ano for x in ["Creche", "Pré", "Berçário"]): nivel_auto = "Infantil"
-                else: nivel_auto = "Fundamental"
-                adicionar_turma({"Escola": esc, "NomeTurma": tnm, "Turno": trn, "AnoBase": ano, "Nivel": nivel_auto, "Regiao": regiao})
-                st.success(f"Turma salva!")
-                st.rerun()
-    if not dt.empty:
-        st.dataframe(dt, use_container_width=True)
-        if st.button("🗑️ Apagar Turmas"):
-            limpar_tabela('Turmas')
-            st.rerun()
-
+# --- ABA 3: TURMAS ---
 with t3:
-    st.markdown("### Professores Especialistas")
-    lista_escolas_existentes = []
-    if not dt.empty: lista_escolas_existentes = sorted(dt['Escola'].unique().tolist())
-    with st.form("novo_prof"):
-        c_cod, c_nom = st.columns([1, 3])
-        cod = c_cod.text_input("Código")
-        nm = c_nom.text_input("Nome")
-        c_ch, c_pl, c_reg = st.columns(3)
-        ch = c_ch.number_input("CH Aulas", 1, 30, 13)
-        pl = c_pl.number_input("PLs", 0, 10, 7)
-        reg_prof = c_reg.selectbox("Região de Atuação", REGIOES_DISPONIVEIS)
-        st.markdown("---")
-        if lista_escolas_existentes: escolas_sel = st.multiselect("Escolas Específicas:", lista_escolas_existentes)
-        else: escolas_sel = []
-        st.markdown("---")
-        cps = st.multiselect("Matérias:", MATERIAS_ESPECIALISTAS)
-        if st.form_submit_button("💾 Salvar Professor"):
-            if cps and nm and escolas_sel:
-                adicionar_professor({"Codigo": cod, "Nome": nm, "Componentes": ",".join(cps), "CH_Aulas": ch, "Qtd_PL": pl, "Escolas": ",".join(escolas_sel), "Regiao": reg_prof})
-                st.success("Salvo!")
-                st.rerun()
-            else: st.error("Preencha campos.")
-    if not dp.empty:
-        st.dataframe(dp, use_container_width=True)
-        if st.button("🗑️ Apagar Professores"):
-            limpar_tabela('Professores')
-            st.rerun()
+    st.markdown("### Cadastro de Turmas")
+    with st.expander("➕ Adicionar Nova Turma (Formulário)", expanded=False):
+        with st.form("nova_turma"):
+            c1, c2 = st.columns(2)
+            esc = c1.text_input("Escola")
+            tnm = c2.text_input("Turma (Ex: A)")
+            c3, c4, c5 = st.columns(3)
+            trn = c3.selectbox("Turno", ["Matutino", "Vespertino"])
+            regiao = c4.selectbox("Região", REGIOES_DISPONIVEIS)
+            ano = c5.selectbox("Ano Base", ["Berçário", "Creche I", "Creche II", "Creche III", "Pré I", "Pré II", "1º Ano", "2º Ano", "3º Ano", "4º Ano", "5º Ano"])
+            if st.form_submit_button("➕ Adicionar"):
+                if not esc or not tnm: st.error("Preencha Escola e Turma!")
+                else:
+                    if any(x in ano for x in ["Creche", "Pré", "Berçário"]): nivel_auto = "Infantil"
+                    else: nivel_auto = "Fundamental"
+                    adicionar_turma_rapido({"Escola": esc, "NomeTurma": tnm, "Turno": trn, "AnoBase": ano, "Nivel": nivel_auto, "Regiao": regiao})
+    
+    st.markdown("---")
+    st.write("### 📝 Editar ou Excluir Turmas")
+    if not dt.empty:
+        turmas_editadas = st.data_editor(dt, num_rows="dynamic", key="editor_turmas", use_container_width=True)
+        if st.button("💾 SALVAR ALTERAÇÕES EM TURMAS", type="primary"):
+            salvar_geral(turmas_editadas, dc, dp, dd)
 
+# --- ABA 4: PROFESSORES ---
 with t4:
+    st.markdown("### Professores Especialistas")
+    with st.expander("➕ Adicionar Novo Professor (Formulário)", expanded=False):
+        lista_escolas_existentes = []
+        if not dt.empty: lista_escolas_existentes = sorted(dt['Escola'].unique().tolist())
+        with st.form("novo_prof"):
+            c_cod, c_nom = st.columns([1, 3])
+            cod = c_cod.text_input("Código")
+            nm = c_nom.text_input("Nome")
+            c_ch, c_pl, c_reg = st.columns(3)
+            ch = c_ch.number_input("CH Aulas (Em sala)", 1, 30, 13)
+            pl = c_pl.number_input("PLs", 0, 10, 7)
+            reg_prof = c_reg.selectbox("Região de Atuação", REGIOES_DISPONIVEIS)
+            st.markdown("---")
+            if lista_escolas_existentes: escolas_sel = st.multiselect("Escolas Específicas:", lista_escolas_existentes)
+            else: escolas_sel = []
+            st.markdown("---")
+            cps = st.multiselect("Matérias:", MATERIAS_ESPECIALISTAS)
+            if st.form_submit_button("💾 Salvar Professor"):
+                if cps and nm and escolas_sel:
+                    adicionar_professor_rapido({"Codigo": cod, "Nome": nm, "Componentes": ",".join(cps), "CH_Aulas": ch, "Qtd_PL": pl, "Escolas": ",".join(escolas_sel), "Regiao": reg_prof})
+    
+    st.markdown("---")
+    st.write("### 📝 Editar ou Excluir Professores")
+    if not dp.empty:
+        professores_editados = st.data_editor(dp, num_rows="dynamic", key="editor_profs", use_container_width=True)
+        if st.button("💾 SALVAR ALTERAÇÕES EM PROFESSORES", type="primary"):
+            salvar_geral(dt, dc, professores_editados, dd)
+
+# --- ABA 5: GERAR GRADE ---
+with t5:
     st.header("🚀 Gerar Grade por Escola")
-    if st.button("GERAR ARQUIVO DE ESCOLAS", type="primary"):
+    st.info("O sistema mostrará prévias das tabelas abaixo enquanto gera o arquivo final.")
+    
+    if st.button("GERAR TABELAS", type="primary"):
         if dt.empty or dp.empty: st.error("Cadastre dados primeiro.")
         else:
             objs_profs = carregar_objetos_professores(dp)
             buffer = io.BytesIO()
-            
-            # --- NOVA LÓGICA DE GERAÇÃO POR ESCOLA ---
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                
                 df_full = pd.merge(dt, dd, on="AnoBase", how="inner")
                 escolas_unicas = df_full['Escola'].unique()
-                
                 progresso = st.progress(0, text="Iniciando...")
                 erros_gerais = []
                 sucesso_algum = False
                 
+                st.markdown("---")
+                st.subheader("👀 Visualização em Tempo Real")
+                
                 for idx, escola in enumerate(escolas_unicas):
-                    progresso.progress((idx+1)/len(escolas_unicas), text=f"Gerando para: {escola}...")
-                    
-                    dados_para_excel = [] # Vai guardar (Titulo, DF)
-                    
-                    # Filtra tudo dessa escola
+                    progresso.progress((idx+1)/len(escolas_unicas), text=f"Gerando: {escola}...")
+                    dados_para_excel = [] 
                     df_escola = df_full[df_full['Escola'] == escola]
-                    
-                    # Identifica quais dias e turnos essa escola tem
                     dias_turnos = df_escola[['DiaSemana', 'Turno']].drop_duplicates()
                     
                     for _, row in dias_turnos.iterrows():
                         dia = row['DiaSemana']
                         turno = row['Turno']
-                        
-                        # Filtra as turmas específicas deste bloco
                         turmas_bloco = df_escola[(df_escola['DiaSemana'] == dia) & (df_escola['Turno'] == turno)]
                         
                         lista_turmas_algoritmo = []
                         for _, t_row in turmas_bloco.iterrows():
-                            # Nome da turma simplificado para a coluna
                             lista_turmas_algoritmo.append({
-                                'nome_turma': t_row['NomeTurma'], # Ex: "1º Ano A"
+                                'nome_turma': t_row['NomeTurma'],
                                 'ano': t_row['AnoBase'], 
                                 'escola_real': escola, 
                                 'regiao_real': t_row['Regiao']
                             })
                         
-                        # Roda o algoritmo
                         resultado, motivo = resolver_horario_grade(lista_turmas_algoritmo, dc, objs_profs)
-                        
                         if resultado:
                             titulo_bloco = f"{turno.upper()} - {dia.upper()}"
                             df_res = pd.DataFrame(resultado)
@@ -490,21 +611,22 @@ with t4:
                         else:
                             erros_gerais.append(f"{escola} ({dia}/{turno}): {motivo}")
 
-                    # Se gerou algo para essa escola, desenha a aba
                     if dados_para_excel:
                         desenhar_tabela_escola(writer, escola, dados_para_excel)
+                        with st.expander(f"🏫 **{escola}** (Clique para ver)", expanded=False):
+                            for titulo, df_raw in dados_para_excel:
+                                st.markdown(f"**{titulo}**")
+                                df_visual = criar_preview_com_recreio(df_raw)
+                                st.dataframe(df_visual, use_container_width=True)
+                                st.divider()
                 
                 progresso.empty()
-                
                 if sucesso_algum:
-                    st.success("✅ Planilha gerada com sucesso! Baixe abaixo.")
+                    st.success("✅ Processo concluído! Baixe o arquivo final abaixo.")
                     if erros_gerais:
-                        with st.expander("⚠️ Ver avisos de turmas não geradas"):
+                        with st.expander("⚠️ Ver avisos de erro"):
                             for e in erros_gerais: st.write(e)
-                else:
-                    st.error("Não foi possível gerar nenhuma grade. Verifique os cadastros.")
-                    if erros_gerais:
-                        for e in erros_gerais: st.write(e)
+                else: st.error("Falha geral.")
 
             buffer.seek(0)
-            st.download_button("📥 Baixar Planilha Bonita (.xlsx)", buffer, "Horarios_Por_Escola.xlsx")
+            st.download_button("📥 Baixar Planilha Completa (.xlsx)", buffer, "Horarios_Por_Escola.xlsx")
