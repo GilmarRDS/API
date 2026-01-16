@@ -69,7 +69,7 @@ Para que o sistema funcione, é necessário configurar as credenciais de acesso:
 
 Crie uma pasta .streamlit na raiz do projeto.
 
-Crie um arquivo secrets.toml dentro dessa pasta.
+Crie um arquivo cccc dentro dessa pasta.
 
 O conteúdo deve seguir este formato (obtenha seus dados no Google Cloud Console):
 
