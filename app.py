@@ -8,11 +8,16 @@ import random
 import io
 import xlsxwriter
 import math
+import copy
 
 # ==========================================
 # 1. CONFIGURAÇÕES & ESTILO
 # ==========================================
 st.set_page_config(page_title="Gerador Escolar Pro", page_icon="🎓", layout="wide")
+
+# --- CORREÇÃO DO ERRO (INICIALIZAÇÃO DO ESTADO) ---
+if 'hora_db' not in st.session_state:
+    st.session_state['hora_db'] = datetime.now().strftime("%H:%M")
 
 st.markdown("""
 <style>
@@ -84,15 +89,10 @@ def ler_aba_segura(aba, colunas_esperadas):
         
         colunas_faltantes = [c for c in colunas_esperadas if c not in df.columns]
         if colunas_faltantes:
-            st.error(f"🚨 **ERRO ESTRUTURAL NA ABA: '{aba}'**")
-            st.code(f"Faltam: {', '.join(colunas_faltantes)}")
-            return pd.DataFrame(), False 
+            st.error(f"🚨 Faltam colunas na aba {aba}: {colunas_faltantes}")
+            return pd.DataFrame(), False
             
-        df = df[colunas_esperadas]
-        # Remove linhas que estão 100% vazias
-        df = df.dropna(how='all')
-        # Substitui NaN por vazio imediatamente
-        df = df.fillna("")
+        df = df[colunas_esperadas].dropna(how='all').fillna("")
         
         for c in df.columns:
             if c in ["QTD_AULAS", "CARGA_HORÁRIA", "QTD_PL"]:
@@ -100,14 +100,13 @@ def ler_aba_segura(aba, colunas_esperadas):
             else:
                 df[c] = df[c].astype(str).apply(padronizar)
         return df, True
-        
     except Exception as e:
-        st.error(f"Erro técnico ao ler {aba}: {e}")
+        st.error(f"Erro ao ler {aba}: {e}") 
         return pd.DataFrame(), False
 
 @st.cache_data(ttl=60, show_spinner=False)
 def carregar_banco():
-    with st.spinner("🔄 Sincronizando com a nuvem..."):
+    with st.spinner("🔄 Carregando sistema..."):
         t, ok_t = ler_aba_segura("Turmas", COLS_PADRAO["Turmas"])
         c, ok_c = ler_aba_segura("Curriculo", COLS_PADRAO["Curriculo"])
         p, ok_p = ler_aba_segura("Professores", COLS_PADRAO["Professores"])
@@ -117,366 +116,154 @@ def carregar_banco():
 
 def salvar_seguro(dt, dc, dp, dd, da):
     try:
-        with st.status("💾 Salvando alterações...", expanded=True) as status:
-            # LIMPEZA FINAL DE NAN
-            dt = dt.replace("nan", "").replace("NAN", "").fillna("")
-            dc = dc.replace("nan", "").replace("NAN", "").fillna("")
-            dp = dp.replace("nan", "").replace("NAN", "").fillna("")
-            dd = dd.replace("nan", "").replace("NAN", "").fillna("")
-            da = da.replace("nan", "").replace("NAN", "").fillna("")
-
-            conn.update(worksheet="Turmas", data=dt)
-            conn.update(worksheet="Curriculo", data=dc)
-            conn.update(worksheet="Professores", data=dp)
-            conn.update(worksheet="ConfigDias", data=dd)
-            conn.update(worksheet="Agrupamentos", data=da)
+        with st.status("💾 Salvando...", expanded=True) as status:
+            conn.update(worksheet="Turmas", data=dt.replace("nan","").fillna(""))
+            conn.update(worksheet="Curriculo", data=dc.replace("nan","").fillna(""))
+            conn.update(worksheet="Professores", data=dp.replace("nan","").fillna(""))
+            conn.update(worksheet="ConfigDias", data=dd.replace("nan","").fillna(""))
+            conn.update(worksheet="Agrupamentos", data=da.replace("nan","").fillna(""))
             
+            definir_hora() # Atualiza hora
             st.cache_data.clear()
-            definir_hora()
             status.update(label="✅ Salvo com sucesso!", state="complete", expanded=False)
         time.sleep(1)
         st.rerun()
-    except Exception as e:
-        if "429" in str(e): st.error("⚠️ Google bloqueou. Aguarde 1 minuto.")
-        else: st.error(f"Erro ao salvar: {e}")
+    except Exception as e: st.error(f"Erro ao salvar: {e}")
 
 def restaurar_cabecalhos_emergencia():
-    with st.status("🛠️ Reparando planilha...", expanded=True) as status:
-        try:
-            for aba, cols in COLS_PADRAO.items():
-                try: df_raw = conn.read(worksheet=aba, ttl=0)
-                except: df_raw = pd.DataFrame()
-                
-                if df_raw.empty:
-                    conn.update(worksheet=aba, data=pd.DataFrame(columns=cols))
-                else:
-                    df_raw = df_raw.fillna("")
-                    if len(df_raw.columns) == len(cols):
-                        df_raw.columns = cols
-                        conn.update(worksheet=aba, data=df_raw)
-                    else:
-                        for c in cols: 
-                            if c not in df_raw.columns: df_raw[c] = ""
-                        conn.update(worksheet=aba, data=df_raw[cols])
-            st.cache_data.clear()
-            status.update(label="✅ Restaurado!", state="complete", expanded=False)
-            time.sleep(1)
-            st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
+    pass 
 
 # ==========================================
-# 4. INTERFACE VISUAL
+# CÉREBRO: RH AUTOMÁTICO (INTELIGÊNCIA DE TURNO)
 # ==========================================
-if 'hora_db' not in st.session_state: st.session_state['hora_db'] = datetime.now().strftime("%H:%M")
-
-dt, dc, dp, dd, da, sistema_seguro = carregar_banco()
-
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2997/2997322.png", width=60)
-    st.title("Gestor Escolar")
-    st.markdown("---")
-    if sistema_seguro: st.success("🟢 Sistema Online")
-    else:
-        st.error("🔴 Erro de Estrutura")
-        if st.button("🛠️ Reparar"): restaurar_cabecalhos_emergencia()
-    st.caption(f"Atualizado: {st.session_state['hora_db']}")
-    if st.button("🔄 Atualizar"):
-        st.cache_data.clear()
-        st.rerun()
-
-st.markdown("## 🎓 Painel de Controle")
-
-t1, t2, t3, t4, t5, t6 = st.tabs([
-    "📊 Dashboard RH", "⚙️ Config", "📍 Rotas", 
-    "🏫 Turmas", "👨‍🏫 Professores", "🚀 Gerador"
-])
-
-def botao_salvar(label, key):
-    if sistema_seguro:
-        if st.button(label, key=key, type="primary", use_container_width=True):
-            salvar_seguro(dt, dc, dp, dd, da)
-    else: st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
-
-# 1. DASHBOARD
-with t1:
-    if dt.empty:
-        st.info("👋 Cadastre turmas para ver o painel.")
-    else:
-        st.markdown("##### 🔍 Filtros de Visualização")
-        c1, c2, c3, c4, c5 = st.columns(5)
+def gerar_professores_automaticos(dt, dc, dp_existente, carga_padrao=20):
+    MAX_AULAS_POR_TURNO = 25 
+    
+    # 1. Demanda
+    demanda = {} 
+    for _, turma in dt.iterrows():
+        regiao = turma['REGIÃO']
+        serie = turma['SÉRIE/ANO']
+        turno = turma['TURNO']
+        curr = dc[dc['SÉRIE/ANO'] == serie]
+        for _, item in curr.iterrows():
+            mat = limpar_materia(item['COMPONENTE'])
+            qtd = int(item['QTD_AULAS'])
+            chave = (regiao, mat, turno)
+            demanda[chave] = demanda.get(chave, 0) + qtd
+            
+    # 2. Oferta
+    oferta = {} 
+    for _, p in dp_existente.iterrows():
+        reg = p['REGIÃO']
+        mats = [limpar_materia(m) for m in str(p['COMPONENTES']).split(',')]
+        carga = int(p['CARGA_HORÁRIA'])
+        vinculo = p['VÍNCULO']
+        turno_fixo = p['TURNO_FIXO']
+        if not mats: continue
+        carga_por_mat = carga / len(mats)
         
-        with c1:
-            regioes_disp = sorted(dt['REGIÃO'].unique().tolist())
-            sel_regiao = st.multiselect("🌍 Região", regioes_disp, placeholder="Todas")
-            
-        with c2:
-            df_escolas = dt[dt['REGIÃO'].isin(sel_regiao)] if sel_regiao else dt
-            escolas_disp = ["Rede Completa"] + sorted(df_escolas['ESCOLA'].unique().tolist())
-            sel_escola = st.selectbox("🏢 Escola", escolas_disp)
-            
-        with c3:
-            niveis = ["Todos"] + sorted(dt['NÍVEL'].unique().tolist())
-            sel_nivel = st.selectbox("👶/👦 Nível", niveis)
-            
-        with c4:
-            series_raw = dt['SÉRIE/ANO'].unique().tolist()
-            series_ord = sorted(series_raw, key=lambda x: ORDEM_SERIES.index(x) if x in ORDEM_SERIES else 99)
-            sel_serie = st.selectbox("📚 Série/Ano", ["Todas"] + series_ord)
-            
-        with c5:
-            df_turmas = dt.copy()
-            if sel_regiao: df_turmas = df_turmas[df_turmas['REGIÃO'].isin(sel_regiao)]
-            if sel_escola != "Rede Completa": df_turmas = df_turmas[df_turmas['ESCOLA'] == sel_escola]
-            if sel_serie != "Todas": df_turmas = df_turmas[df_turmas['SÉRIE/ANO'] == sel_serie]
-            
-            turmas_disp = ["Todas"] + sorted(df_turmas['TURMA'].unique().tolist())
-            sel_turma = st.selectbox("🔠 Turma", turmas_disp)
-        
-        st.markdown("---")
-
-        alvo = dt.copy()
-        if sel_regiao: alvo = alvo[alvo['REGIÃO'].isin(sel_regiao)]
-        if sel_escola != "Rede Completa": alvo = alvo[alvo['ESCOLA'] == sel_escola]
-        if sel_nivel != "Todos": alvo = alvo[alvo['NÍVEL'] == sel_nivel]
-        if sel_serie != "Todas": alvo = alvo[alvo['SÉRIE/ANO'] == sel_serie]
-        if sel_turma != "Todas": alvo = alvo[alvo['TURMA'] == sel_turma]
-            
-        dem = {}
-        total_aulas_demanda = 0
-        for _, r in alvo.iterrows():
-            curr = dc[dc['SÉRIE/ANO'] == r['SÉRIE/ANO']]
-            for _, i in curr.iterrows():
-                m = limpar_materia(i['COMPONENTE'])
-                qtd = int(i['QTD_AULAS'])
-                dem[m] = dem.get(m, 0) + qtd
-                total_aulas_demanda += qtd
-        
-        oferta = {}
-        total_aulas_oferta = 0
-        
-        for _, p in dp.iterrows():
-            if sel_regiao and p['REGIÃO'] not in sel_regiao: continue
-            if p['VÍNCULO'] == 'EFETIVO':
-                if sel_escola != "Rede Completa" and sel_escola not in str(p['ESCOLAS_ALOCADAS']): continue
-            
-            ms = [limpar_materia(x) for x in str(p['COMPONENTES']).split(',')]
-            ch_total = int(p['CARGA_HORÁRIA'])
-            
-            if len(ms) > 0:
-                ch_por_materia = ch_total / len(ms)
-                for m in ms: 
-                    oferta[m] = oferta.get(m, 0) + ch_por_materia
-                total_aulas_oferta += ch_total
-        
-        col_metrics, col_rh = st.columns([3, 1])
-        with col_rh:
-            st.markdown("⚙️ **Planejamento**")
-            ch_padrao = st.slider("Média de Aulas por Professor", min_value=5, max_value=40, value=20, help="Use este valor para estimar contratações.")
-        
-        with col_metrics:
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Turmas", len(alvo))
-            m2.metric("Demanda Total", f"{total_aulas_demanda} Aulas")
-            m3.metric("Oferta Atual", f"{int(total_aulas_oferta)} Aulas")
-            
-            deficit_aulas = max(0, total_aulas_demanda - total_aulas_oferta)
-            profs_estimados_total = math.ceil(deficit_aulas / ch_padrao) if deficit_aulas > 0 else 0
-            
-            m4.metric("Déficit Geral", f"{int(deficit_aulas)} Aulas", delta_color="inverse")
-
-        if deficit_aulas > 0:
-            st.info(f"💡 Para cobrir a falta de **{int(deficit_aulas)} aulas**, considerando uma média de {ch_padrao} aulas/prof, estima-se contratar **{profs_estimados_total} Professores (DTs)**.")
-        else:
-            st.success("✅ A carga horária atual cobre a demanda das turmas selecionadas.")
-
-        st.markdown("### 📋 Quadro de Necessidades por Disciplina")
-        res = []
-        for m, q in dem.items():
-            o = oferta.get(m, 0)
-            saldo = q - o
-            
-            if saldo > 0:
-                qtd_contratar = saldo / ch_padrao
-                status = "🔴 Contratar"
+        for m in mats:
+            if vinculo == "EFETIVO" and turno_fixo in ["MATUTINO", "VESPERTINO"]:
+                chave = (reg, m, turno_fixo)
+                oferta[chave] = oferta.get(chave, 0) + carga_por_mat
             else:
-                qtd_contratar = 0
-                status = "🟢 Completo"
-                
-            res.append({
-                "Disciplina": m, 
-                "Demanda (Aulas)": q, 
-                "Oferta (Aulas)": round(o, 1), 
-                "Saldo (Aulas)": round(saldo, 1), 
-                "Est. Contratação": round(qtd_contratar, 1),
-                "Situação": status
-            })
+                cap_mat = min(carga_por_mat, MAX_AULAS_POR_TURNO)
+                oferta[(reg, m, "MATUTINO")] = oferta.get((reg, m, "MATUTINO"), 0) + cap_mat
+                sobra = max(0, carga_por_mat - cap_mat)
+                if sobra > 0:
+                    oferta[(reg, m, "VESPERTINO")] = oferta.get((reg, m, "VESPERTINO"), 0) + sobra
+
+    # 3. Geração
+    novos_profs = []
+    ult_cod = 0
+    # Extrai números de códigos existentes
+    for c in dp_existente['CÓDIGO']:
+        nums = re.findall(r'\d+', str(c))
+        if nums:
+            val = int(nums[0])
+            if val > ult_cod: ult_cod = val
+    count = ult_cod + 1
+    log = []
+
+    for (regiao, materia, turno), qtd_necessaria in demanda.items():
+        qtd_coberta = oferta.get((regiao, materia, turno), 0)
+        saldo = qtd_necessaria - qtd_coberta
         
-        df_res = pd.DataFrame(res)
-        if not df_res.empty:
-            st.dataframe(
-                df_res, use_container_width=True, hide_index=True,
-                column_config={
-                    "Saldo (Aulas)": st.column_config.NumberColumn("Falta (Aulas)", format="%d"),
-                    "Est. Contratação": st.column_config.NumberColumn("Novos Profs (Qtd)", format="%.1f"),
-                    "Situação": st.column_config.TextColumn("Status")
-                }
-            )
-        else:
-            st.info("Nenhuma demanda encontrada.")
-
-# 2. CONFIG
-with t2:
-    col_d, col_c = st.columns(2)
-    with col_d:
-        with st.container(border=True):
-            st.subheader("📅 Dias de Planejamento")
-            st.info("Selecione a linha e aperte **Delete** para apagar.")
-            if not dd.empty: dd = st.data_editor(dd, num_rows="dynamic", use_container_width=True, key="edd", hide_index=True)
-            with st.popover("➕ Adicionar"):
-                with st.form("fd"):
-                    a = st.selectbox("Série", ORDEM_SERIES)
-                    d = st.selectbox("Dia", ["SEGUNDA-FEIRA", "TERÇA-FEIRA", "QUARTA-FEIRA", "QUINTA-FEIRA", "SEXTA-FEIRA"])
-                    if st.form_submit_button("Add"):
-                        if sistema_seguro:
-                            dd = pd.concat([dd, pd.DataFrame([{"SÉRIE/ANO": a, "DIA_PLANEJAMENTO": d}])], ignore_index=True)
-                            salvar_seguro(dt, dc, dp, dd, da)
-    with col_c:
-        with st.container(border=True):
-            st.subheader("📚 Currículo")
-            st.info("Selecione a linha e aperte **Delete** para apagar.")
-            if not dc.empty: dc = st.data_editor(dc, num_rows="dynamic", use_container_width=True, key="edc", hide_index=True)
-            with st.popover("➕ Adicionar"):
-                with st.form("fc"):
-                    a = st.selectbox("Série", ORDEM_SERIES, key="aca")
-                    m = st.selectbox("Matéria", MATERIAS_ESPECIALISTAS)
-                    q = st.number_input("Qtd", 1, 10, 2)
-                    if st.form_submit_button("Add"):
-                        if sistema_seguro:
-                            dc = pd.concat([dc, pd.DataFrame([{"SÉRIE/ANO": a, "COMPONENTE": m, "QTD_AULAS": q}])], ignore_index=True)
-                            salvar_seguro(dt, dc, dp, dd, da)
-    st.markdown("###"); botao_salvar("💾 Salvar Configurações", "btn_save_config")
-
-# 3. ROTAS
-with t3:
-    c_lista, c_form = st.columns([2,1])
-    with c_lista:
-        if not da.empty: da = st.data_editor(da, num_rows="dynamic", use_container_width=True, key="edr", hide_index=True)
-    with c_form:
-        with st.container(border=True):
-            st.write("Nova Rota")
-            n = st.text_input("Nome Rota")
-            l = st.multiselect("Escolas", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
-            if st.button("Criar", use_container_width=True):
-                if sistema_seguro:
-                    da = pd.concat([da, pd.DataFrame([{"NOME_ROTA": n, "LISTA_ESCOLAS": ",".join(l)}])], ignore_index=True)
-                    salvar_seguro(dt, dc, dp, dd, da)
-    st.markdown("###"); botao_salvar("💾 Salvar Rotas", "btn_save_rotas")
-
-# 4. TURMAS
-with t4:
-    with st.expander("➕ Nova Turma", expanded=False):
-        with st.form("ft"):
-            c1,c2,c3 = st.columns(3)
-            e = c1.selectbox("Escola", sorted(dt['ESCOLA'].unique()) + ["NOVA..."] if not dt.empty else ["NOVA..."])
-            if e=="NOVA...": e = c1.text_input("Nome Escola")
-            t = c2.text_input("Turma")
-            tn = c3.selectbox("Turno", ["MATUTINO", "VESPERTINO"])
-            c4,c5 = st.columns(2)
-            an = c4.selectbox("Ano", ORDEM_SERIES)
-            rg = c5.selectbox("Região", REGIOES)
-            if st.form_submit_button("Salvar"):
-                if sistema_seguro:
-                    nv = "INFANTIL" if "ANO" not in an else "FUNDAMENTAL"
-                    dt = pd.concat([dt, pd.DataFrame([{"ESCOLA": padronizar(e), "TURMA": padronizar(t), "TURNO": tn, "SÉRIE/ANO": an, "REGIÃO": rg, "NÍVEL": nv}])], ignore_index=True)
-                    salvar_seguro(dt, dc, dp, dd, da)
-    if not dt.empty:
-        st.info("🗑️ **Para Excluir:** Selecione a linha (clique no número à esquerda) e aperte **Delete** no teclado.")
-        dt = st.data_editor(dt, num_rows="dynamic", use_container_width=True, key="edt", hide_index=True)
-        botao_salvar("💾 Salvar Turmas", "btn_save_turmas")
-
-# 5. PROFS
-with t5:
-    with st.expander("➕ Novo Professor", expanded=False):
-        tp = st.radio("Vínculo", ["DT", "EFETIVO"], horizontal=True)
-        with st.form("fp"):
-            c1,c2 = st.columns([1,3])
-            cd = c1.text_input("Cod")
-            nm = c2.text_input("Nome")
-            c3,c4,c5 = st.columns(3)
-            ch = c3.number_input("Qtd. Aulas (Carga)", 1, 60, 20)
-            pl = c4.number_input("PL (Planejamento)", 0, 10, 0)
-            rg = c5.selectbox("Região", REGIOES)
-            cm = st.multiselect("Matérias", MATERIAS_ESPECIALISTAS)
+        if saldo > 0:
+            carga_max = min(carga_padrao, MAX_AULAS_POR_TURNO)
+            qtd_profs = math.ceil(saldo / carga_max)
+            restante = saldo
             
-            if tp == "EFETIVO":
-                ef_esc = st.multiselect("Escola Fixa (Efetivo)", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
-                ef_trn = st.selectbox("Turno Fixo", ["", "MATUTINO", "VESPERTINO", "AMBOS"])
-            else:
-                ef_esc = []
-                ef_trn = ""
+            for i in range(qtd_profs):
+                carga_este = min(carga_max, restante)
+                restante -= carga_este
                 
-            if st.form_submit_button("Salvar"):
-                if sistema_seguro:
-                    str_esc = ",".join(ef_esc) if ef_esc else ""
-                    dp = pd.concat([dp, pd.DataFrame([{"CÓDIGO": cd, "NOME": padronizar(nm), "CARGA_HORÁRIA": ch, "QTD_PL": pl, "REGIÃO": rg, "COMPONENTES": ",".join(cm), "VÍNCULO": tp, "ESCOLAS_ALOCADAS": str_esc, "TURNO_FIXO": ef_trn}])], ignore_index=True)
-                    salvar_seguro(dt, dc, dp, dd, da)
-                    
-    if not dp.empty:
-        st.info("🗑️ **Para Excluir:** Selecione a linha (clique no número à esquerda) e aperte **Delete** no teclado.")
-        dp = st.data_editor(dp, num_rows="dynamic", use_container_width=True, key="edp", hide_index=True, column_config={"CARGA_HORÁRIA": st.column_config.NumberColumn("Aulas", format="%d"), "QTD_PL": st.column_config.NumberColumn("PL", format="%d")})
-        botao_salvar("💾 Salvar Professores", "btn_save_profs")
+                novos_profs.append({
+                    "CÓDIGO": f"DT-{count}",
+                    "NOME": f"VAGA {materia} ({regiao}-{turno[:3]})",
+                    "COMPONENTES": materia,
+                    "CARGA_HORÁRIA": int(carga_este),
+                    "REGIÃO": regiao,
+                    "VÍNCULO": "DT",
+                    "TURNO_FIXO": "",
+                    "ESCOLAS_ALOCADAS": "",
+                    "QTD_PL": 0
+                })
+                count += 1
+            log.append(f"Criados {qtd_profs} profs para {regiao}/{materia}/{turno}")
+            
+    return pd.DataFrame(novos_profs), log
 
-# 6. GERAR
+# ==========================================
+# CÉREBRO: GERADOR BLINDADO
+# ==========================================
 def carregar_objs(df):
     l = []
     for _, r in df.iterrows():
-        ms = [limpar_materia(m) for m in str(r['COMPONENTES']).split(',')]
+        ms = [limpar_materia(m) for m in str(r['COMPONENTES']).split(',') if limpar_materia(m)]
         vinc = str(r['VÍNCULO']).strip().upper()
-        if vinc == "DT": 
-            tf = ""
-            ef = []
-        else:
-            tf = padronizar(r['TURNO_FIXO'])
-            ef = str(r['ESCOLAS_ALOCADAS']).split(',')
+        if "VAGA" in str(r['NOME']): vinc = "DT"
+        
+        tf = "" if vinc == "DT" else padronizar(r['TURNO_FIXO'])
+        ef = [] if vinc == "DT" else [padronizar(x) for x in str(r['ESCOLAS_ALOCADAS']).split(',') if padronizar(x)]
 
         for m in ms:
             if m in MATERIAS_ESPECIALISTAS:
                 l.append({
                     'id': str(r['CÓDIGO']), 'nome': r['NOME'], 'mat': m,
-                    'reg': padronizar(r['REGIÃO']), 'vin': vinc,
-                    'tf': tf, 'ef': ef,
-                    'max': int(r['CARGA_HORÁRIA']), 'atrib': 0, 'ocup': [], 'escolas': set(), 'turnos_ativos': set()
+                    'reg': padronizar(r['REGIÃO']), 'vin': vinc, 'tf': tf, 'ef': ef,
+                    'max': int(r['CARGA_HORÁRIA']), 'atrib': 0, 'ocup': {}, 'escolas': set(), 'turnos_ativos': set()
                 })
     return l
 
 def carregar_rotas(df):
     m = {}
     for _, row in df.iterrows():
-        escs = str(row['LISTA_ESCOLAS']).split(',')
-        for e in escs: m[padronizar(e)] = [padronizar(x) for x in escs]
+        escs = [padronizar(x) for x in str(row['LISTA_ESCOLAS']).split(',') if padronizar(x)]
+        for e in escs: m[e] = escs
     return m
 
 def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
     turno_atual = padronizar(turno_atual)
-    for p in profs: p['ocup'] = []
+    for p in profs: p['ocup'] = {} # Reset
     
     demandas = []
     for turma in turmas:
         curr = curriculo[curriculo['SÉRIE/ANO'] == turma['ano']]
         aulas = []
         for _, r in curr.iterrows():
-            if r['QTD_AULAS'] > 0: aulas.extend([limpar_materia(r['COMPONENTE'])] * int(r['QTD_AULAS']))
+            mat = limpar_materia(r['COMPONENTE'])
+            if r['QTD_AULAS'] > 0 and mat: aulas.extend([mat] * int(r['QTD_AULAS']))
         while len(aulas) < 5: aulas.append("---")
-        for mat in aulas[:5]: demandas.append({'turma': turma, 'mat': mat, 'pri': 0 if mat=="---" else 1})
+        for slot_idx, mat in enumerate(aulas[:5]): 
+            demandas.append({'turma': turma, 'mat': mat, 'slot': slot_idx, 'pri': 0 if mat=="---" else 1})
     
-    demandas.sort(key=lambda x: x['pri'], reverse=True)
+    demandas.sort(key=lambda x: (x['pri'], random.random()), reverse=True)
     
     for _ in range(500):
         grade = {t['nome_turma']: [None]*5 for t in turmas}
-        profs_sim = [p.copy() for p in profs]
-        for p in profs_sim: 
-            p['ocup'] = list(p['ocup']); p['escolas'] = set(p['escolas']); p['turnos_ativos'] = set(p['turnos_ativos'])
-        
+        profs_sim = copy.deepcopy(profs)
         random.shuffle(demandas)
         demandas.sort(key=lambda x: x['pri'], reverse=True)
         sucesso = True
@@ -484,66 +271,65 @@ def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
         
         for item in demandas:
             turma, mat = item['turma'], item['mat']
-            nm_t, esc, reg = turma['nome_turma'], turma['escola_real'], turma['regiao_real']
-            esc_pad = padronizar(esc)
-            reg_pad = padronizar(reg)
-            
-            slots = [i for i, v in enumerate(grade[nm_t]) if v is None]
-            random.shuffle(slots)
-            alocado = False
+            nm_t = turma['nome_turma']
+            esc = padronizar(turma['escola_real'])
+            reg = padronizar(turma['regiao_real'])
+            slot = item['slot']
             
             if mat == "---":
-                if slots: grade[nm_t][slots[0]] = "---"; alocado=True
-            else:
-                for slot in slots:
-                    candidatos = []
-                    for p in profs_sim:
-                        if p['mat'] != mat: continue
-                        
-                        score = 0
-                        if p['vin'] == "EFETIVO":
-                            if p['tf'] and p['tf'] not in ["AMBOS", ""] and p['tf'] != turno_atual: continue
-                            atende = False
-                            for ef in p['ef']: 
-                                if padronizar(ef) == esc_pad: atende = True
-                            if atende: score += 2000
-                            else: continue 
-                        else:
-                            # DT - LÓGICA CORRIGIDA E AGRESSIVA
-                            if p['reg'] != reg_pad: continue 
-                            if slot in p['ocup']: continue 
-                            if p['atrib'] >= p['max']: continue 
-                            
-                            if esc_pad in p['escolas']: score += 1000 
-                            elif any(padronizar(x) in p['escolas'] for x in rotas.get(esc_pad,[])): score += 500
-                            elif len(p['escolas']) == 0: score += 1000 # PRIORIDADE: SEM ESCOLA, PEGA ESSA
-                            else: score += 10
-                        
-                        candidatos.append((score, p))
-                    
-                    if candidatos:
-                        candidatos.sort(key=lambda x: x[0], reverse=True)
-                        best_score = candidatos[0][0]
-                        escolhido = random.choice([c[1] for c in candidatos if c[0] == best_score])
-                        
-                        # ETIQUETA FORMATADA: ID - NOME
-                        lbl = f"{escolhido['id']} - {escolhido['nome']}"
-                        grade[nm_t][slot] = f"{mat}\n{lbl}"
-                        
-                        escolhido['ocup'].append(slot)
-                        escolhido['atrib'] += 1
-                        escolhido['escolas'].add(esc_pad)
-                        escolhido['turnos_ativos'].add(turno_atual)
-                        alocado = True
-                        break
+                if grade[nm_t][slot] is None: grade[nm_t][slot] = "---"
+                continue
             
-            if not alocado:
-                motivo_falha = f"Falta {mat} em {esc} (Reg: {reg})"
-                sucesso = False
-                break
+            candidatos = []
+            for p in profs_sim:
+                if p['mat'] != mat: continue
+                score = 0
+                
+                if p['vin'] == "EFETIVO":
+                    if p['tf'] and p['tf'] not in ["AMBOS", "", turno_atual]: continue
+                    if not any(padronizar(ef) == esc for ef in p['ef']): continue
+                    score += 3000
+                else: # DT
+                    if p['reg'] != reg: continue
+                    if p['atrib'] >= p['max']: continue
+                    
+                    # 1. TRAVA HORÁRIO
+                    ocupado_agora = False
+                    for esc_ocupada, turmas_ocupadas in p['ocup'].items():
+                        for slots_ocupados in turmas_ocupadas.values():
+                            if slot in slots_ocupados:
+                                ocupado_agora = True; break
+                        if ocupado_agora: break
+                    if ocupado_agora: continue 
+
+                    # 2. TRAVA GEOGRÁFICA
+                    if esc in p['escolas']: score += 2000 
+                    elif any(padronizar(x) in p['escolas'] for x in rotas.get(esc, [])): score += 1000
+                    elif len(p['escolas']) == 0: 
+                        if turno_atual[:3] in p['nome']: score += 2500
+                        else: score += 1500 
+                    else: score += 10
+                
+                candidatos.append((score, p))
+            
+            if candidatos:
+                candidatos.sort(key=lambda x: -x[0])
+                escolhido = candidatos[0][1]
+                
+                # SÓ CÓDIGO
+                lbl = f"{escolhido['id']}" 
+                grade[nm_t][slot] = f"{mat}\n{lbl}"
+                
+                if esc not in escolhido['ocup']: escolhido['ocup'][esc] = {}
+                if nm_t not in escolhido['ocup'][esc]: escolhido['ocup'][esc][nm_t] = []
+                escolhido['ocup'][esc][nm_t].append(slot)
+                escolhido['atrib'] += 1
+                escolhido['escolas'].add(esc)
+            else:
+                motivo_falha = f"Falta {mat} em {esc}"
+                sucesso = False; break
         
         if sucesso: return True, grade, None, profs_sim
-        
     return False, None, motivo_falha, []
 
 def desenhar_xls(writer, escola, dados):
@@ -570,6 +356,182 @@ def criar_preview_com_recreio(df):
     final.index = ["1ª", "2ª", "3ª", "INT", "4ª", "5ª"]
     return final
 
+# ==========================================
+# UI - LAYOUT ORIGINAL 6 ABAS
+# ==========================================
+dt, dc, dp, dd, da, sistema_seguro = carregar_banco()
+
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2997/2997322.png", width=60)
+    st.title("Gestor Escolar")
+    st.markdown("---")
+    if sistema_seguro: st.success("🟢 Sistema Online")
+    else:
+        st.error("🔴 Erro de Estrutura")
+        if st.button("🛠️ Reparar"): restaurar_cabecalhos_emergencia()
+    st.caption(f"Atualizado: {st.session_state['hora_db']}")
+    if st.button("🔄 Atualizar"): st.cache_data.clear(); st.rerun()
+
+t1, t2, t3, t4, t5, t6 = st.tabs([
+    "📊 Dashboard", "⚙️ Config", "📍 Rotas", 
+    "🏫 Turmas", "👨‍🏫 Professores", "🚀 Gerador"
+])
+
+def botao_salvar(label, key):
+    if sistema_seguro:
+        if st.button(label, key=key, type="primary", use_container_width=True):
+            salvar_seguro(dt, dc, dp, dd, da)
+    else: st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
+
+# 1. DASHBOARD
+with t1:
+    if dt.empty: st.info("Cadastre turmas.")
+    else:
+        c1,c2,c3,c4,c5 = st.columns(5)
+        with c1: 
+            sel_regiao = st.multiselect("🌍 Região", sorted(dt['REGIÃO'].unique()))
+        with c2: 
+            esc_opts = dt[dt['REGIÃO'].isin(sel_regiao)]['ESCOLA'].unique() if sel_regiao else dt['ESCOLA'].unique()
+            sel_escola = st.selectbox("🏢 Escola", ["Rede Completa"] + sorted(list(esc_opts)))
+        with c3: sel_nivel = st.selectbox("👶/👦 Nível", ["Todos"] + sorted(dt['NÍVEL'].unique().tolist()))
+        with c4: sel_serie = st.selectbox("📚 Série", ["Todas"] + ORDEM_SERIES)
+        with c5: sel_turma = st.selectbox("🔠 Turma", ["Todas"] + sorted(dt['TURMA'].unique().tolist()))
+        st.markdown("---")
+        
+        alvo = dt.copy()
+        if sel_regiao: alvo = alvo[alvo['REGIÃO'].isin(sel_regiao)]
+        if sel_escola != "Rede Completa": alvo = alvo[alvo['ESCOLA'] == sel_escola]
+        if sel_nivel != "Todos": alvo = alvo[alvo['NÍVEL'] == sel_nivel]
+        if sel_serie != "Todas": alvo = alvo[alvo['SÉRIE/ANO'] == sel_serie]
+        if sel_turma != "Todas": alvo = alvo[alvo['TURMA'] == sel_turma]
+        
+        dem, oferta = {}, {}
+        tot_dem, tot_of = 0, 0
+        for _, r in alvo.iterrows():
+            curr = dc[dc['SÉRIE/ANO'] == r['SÉRIE/ANO']]
+            for _, i in curr.iterrows():
+                m = limpar_materia(i['COMPONENTE'])
+                qtd = int(i['QTD_AULAS'])
+                dem[m] = dem.get(m, 0) + qtd
+                tot_dem += qtd
+                
+        for _, p in dp.iterrows():
+            if sel_regiao and p['REGIÃO'] not in sel_regiao: continue
+            if p['VÍNCULO'] == 'EFETIVO' and sel_escola != "Rede Completa" and sel_escola not in str(p['ESCOLAS_ALOCADAS']): continue
+            ms = [limpar_materia(x) for x in str(p['COMPONENTES']).split(',')]
+            ch = int(p['CARGA_HORÁRIA'])
+            if ms:
+                rat = ch / len(ms)
+                for m in ms: oferta[m] = oferta.get(m, 0) + rat
+                tot_of += ch
+        
+        c_m, c_r = st.columns([3,1])
+        with c_m:
+            m1,m2,m3,m4 = st.columns(4)
+            m1.metric("Turmas", len(alvo))
+            m2.metric("Demanda", tot_dem)
+            m3.metric("Oferta", int(tot_of))
+            m4.metric("Déficit", max(0, tot_dem - tot_of))
+        
+        with c_r: ch_padrao = st.slider("Média Aulas/Prof", 10, 40, 20)
+        
+        res = []
+        for m, q in dem.items():
+            o = oferta.get(m, 0)
+            s = q-o
+            res.append({"Matéria": m, "Falta": int(s), "Novos": round(s/ch_padrao, 1) if s>0 else 0, "Status": "🔴" if s>0 else "🟢"})
+        st.dataframe(pd.DataFrame(res), use_container_width=True)
+
+# 2. CONFIG
+with t2:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("📅 Dias"); dd = st.data_editor(dd, num_rows="dynamic", key="edd")
+        with st.form("fd"):
+            a = st.selectbox("Série", ORDEM_SERIES)
+            d = st.selectbox("Dia", ["SEGUNDA-FEIRA", "TERÇA-FEIRA", "QUARTA-FEIRA", "QUINTA-FEIRA", "SEXTA-FEIRA"])
+            if st.form_submit_button("Add"): 
+                dd = pd.concat([dd, pd.DataFrame([{"SÉRIE/ANO": a, "DIA_PLANEJAMENTO": d}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
+    with c2:
+        st.write("📚 Currículo"); dc = st.data_editor(dc, num_rows="dynamic", key="edc")
+        with st.form("fc"):
+            a = st.selectbox("Série", ORDEM_SERIES, key="aca")
+            m = st.selectbox("Matéria", MATERIAS_ESPECIALISTAS)
+            q = st.number_input("Qtd", 1, 10, 2)
+            if st.form_submit_button("Add"):
+                dc = pd.concat([dc, pd.DataFrame([{"SÉRIE/ANO": a, "COMPONENTE": m, "QTD_AULAS": q}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
+    botao_salvar("Salvar Config", "bcfg")
+
+# 3. ROTAS
+with t3:
+    da = st.data_editor(da, num_rows="dynamic", key="edr")
+    with st.expander("Nova Rota"):
+        with st.form("fr"):
+            n = st.text_input("Nome")
+            l = st.multiselect("Escolas", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
+            if st.form_submit_button("Criar"):
+                da = pd.concat([da, pd.DataFrame([{"NOME_ROTA": n, "LISTA_ESCOLAS": ",".join(l)}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
+    botao_salvar("Salvar Rotas", "brot")
+
+# 4. TURMAS
+with t4:
+    with st.expander("➕ Nova Turma", expanded=False):
+        with st.form("ft"):
+            c1,c2,c3 = st.columns(3)
+            e = c1.selectbox("Escola", sorted(dt['ESCOLA'].unique()) + ["NOVA..."] if not dt.empty else ["NOVA..."])
+            if e=="NOVA...": e = c1.text_input("Nome Escola")
+            t = c2.text_input("Turma")
+            tn = c3.selectbox("Turno", ["MATUTINO", "VESPERTINO"])
+            c4,c5 = st.columns(2)
+            an = c4.selectbox("Ano", ORDEM_SERIES)
+            rg = c5.selectbox("Região", REGIOES)
+            if st.form_submit_button("Salvar"):
+                nv = "INFANTIL" if "ANO" not in an else "FUNDAMENTAL"
+                dt = pd.concat([dt, pd.DataFrame([{"ESCOLA": padronizar(e), "TURMA": padronizar(t), "TURNO": tn, "SÉRIE/ANO": an, "REGIÃO": rg, "NÍVEL": nv}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
+    dt = st.data_editor(dt, num_rows="dynamic", key="edt")
+    botao_salvar("Salvar Turmas", "btur")
+
+# 5. PROFS (COM RH EMBUTIDO)
+with t5:
+    with st.expander("🤖 Ferramenta: Gerar Vagas Automáticas (RH)", expanded=False):
+        st.info("Cria códigos de professores (DT) automaticamente baseado na falta de aulas.")
+        c_rh, c_btn = st.columns([1,1])
+        with c_rh: carga_padrao = st.number_input("Carga Padrão", 10, 40, 20)
+        with c_btn:
+            st.write("")
+            st.write("")
+            if st.button("🚀 Calcular e Criar Vagas"):
+                novos, log = gerar_professores_automaticos(dt, dc, dp, carga_padrao)
+                if not novos.empty:
+                    dp = pd.concat([dp, novos], ignore_index=True)
+                    salvar_seguro(dt, dc, dp, dd, da)
+                    st.success(f"{len(novos)} vagas criadas!")
+                    for l in log: st.caption(l)
+                else: st.warning("Quadro completo.")
+
+    with st.expander("➕ Novo Professor Manual", expanded=False):
+        tp = st.radio("Vínculo", ["DT", "EFETIVO"], horizontal=True)
+        with st.form("fp"):
+            c1,c2 = st.columns([1,3])
+            cd = c1.text_input("Cod")
+            nm = c2.text_input("Nome")
+            c3,c4,c5 = st.columns(3)
+            ch = c3.number_input("Aulas", 1, 60, 20)
+            pl = c4.number_input("PL", 0, 10, 0)
+            rg = c5.selectbox("Região", REGIOES)
+            cm = st.multiselect("Matérias", MATERIAS_ESPECIALISTAS)
+            if tp == "EFETIVO":
+                ef_esc = st.multiselect("Escolas", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
+                ef_trn = st.selectbox("Turno", ["", "MATUTINO", "VESPERTINO", "AMBOS"])
+            else: ef_esc, ef_trn = [], ""
+            if st.form_submit_button("Salvar"):
+                str_esc = ",".join(ef_esc) if ef_esc else ""
+                dp = pd.concat([dp, pd.DataFrame([{"CÓDIGO": cd, "NOME": padronizar(nm), "CARGA_HORÁRIA": ch, "QTD_PL": pl, "REGIÃO": rg, "COMPONENTES": ",".join(cm), "VÍNCULO": tp, "ESCOLAS_ALOCADAS": str_esc, "TURNO_FIXO": ef_trn}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
+    
+    dp = st.data_editor(dp, num_rows="dynamic", key="edp")
+    botao_salvar("Salvar Profs", "bprof")
+
+# 6. GERADOR
 with t6:
     if sistema_seguro:
         if st.button("🚀 Gerar Grade"):
@@ -580,7 +542,7 @@ with t6:
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     merged = pd.merge(dt, dd, on="SÉRIE/ANO", how="inner")
                     escolas = merged['ESCOLA'].unique()
-                    if len(escolas) == 0: st.error("Erro: Dados incompletos."); st.stop()
+                    if len(escolas) == 0: st.error("Erro dados."); st.stop()
                     
                     prog = st.progress(0)
                     for i, esc in enumerate(escolas):
@@ -599,7 +561,6 @@ with t6:
                             else: st.warning(f"{esc}: {err}")
                         if dados_xls:
                             desenhar_xls(writer, esc, dados_xls)
-                            st.write("✅ OK")
                             for ti, dx in dados_xls: st.caption(ti); st.dataframe(criar_preview_com_recreio(dx), use_container_width=True)
                     
                     mapa = {p['id']: ",".join(sorted(list(p['escolas']))) for p in profs_obj}

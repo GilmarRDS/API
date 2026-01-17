@@ -92,6 +92,7 @@ No terminal, execute:
 Bash
 
 streamlit run app.py
+python -m streamlit run app.py
 O sistema abrirá automaticamente no seu navegador.
 
 📋 Estrutura da Planilha
