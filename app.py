@@ -58,7 +58,9 @@ def definir_hora():
 
 def padronizar(texto):
     if pd.isna(texto): return ""
-    return str(texto).strip().upper()
+    txt = str(texto).strip().upper()
+    if txt == "NAN": return ""
+    return " ".join(txt.split())
 
 def limpar_materia(nome):
     nome = padronizar(nome)
@@ -87,7 +89,10 @@ def ler_aba_segura(aba, colunas_esperadas):
             return pd.DataFrame(), False 
             
         df = df[colunas_esperadas]
+        # Remove linhas que estão 100% vazias
         df = df.dropna(how='all')
+        # Substitui NaN por vazio imediatamente
+        df = df.fillna("")
         
         for c in df.columns:
             if c in ["QTD_AULAS", "CARGA_HORÁRIA", "QTD_PL"]:
@@ -113,6 +118,13 @@ def carregar_banco():
 def salvar_seguro(dt, dc, dp, dd, da):
     try:
         with st.status("💾 Salvando alterações...", expanded=True) as status:
+            # LIMPEZA FINAL DE NAN
+            dt = dt.replace("nan", "").replace("NAN", "").fillna("")
+            dc = dc.replace("nan", "").replace("NAN", "").fillna("")
+            dp = dp.replace("nan", "").replace("NAN", "").fillna("")
+            dd = dd.replace("nan", "").replace("NAN", "").fillna("")
+            da = da.replace("nan", "").replace("NAN", "").fillna("")
+
             conn.update(worksheet="Turmas", data=dt)
             conn.update(worksheet="Curriculo", data=dc)
             conn.update(worksheet="Professores", data=dp)
@@ -138,6 +150,7 @@ def restaurar_cabecalhos_emergencia():
                 if df_raw.empty:
                     conn.update(worksheet=aba, data=pd.DataFrame(columns=cols))
                 else:
+                    df_raw = df_raw.fillna("")
                     if len(df_raw.columns) == len(cols):
                         df_raw.columns = cols
                         conn.update(worksheet=aba, data=df_raw)
@@ -418,12 +431,20 @@ def carregar_objs(df):
     l = []
     for _, r in df.iterrows():
         ms = [limpar_materia(m) for m in str(r['COMPONENTES']).split(',')]
+        vinc = str(r['VÍNCULO']).strip().upper()
+        if vinc == "DT": 
+            tf = ""
+            ef = []
+        else:
+            tf = padronizar(r['TURNO_FIXO'])
+            ef = str(r['ESCOLAS_ALOCADAS']).split(',')
+
         for m in ms:
             if m in MATERIAS_ESPECIALISTAS:
                 l.append({
                     'id': str(r['CÓDIGO']), 'nome': r['NOME'], 'mat': m,
-                    'reg': r['REGIÃO'], 'vin': r['VÍNCULO'],
-                    'tf': r['TURNO_FIXO'], 'ef': str(r['ESCOLAS_ALOCADAS']).split(','),
+                    'reg': padronizar(r['REGIÃO']), 'vin': vinc,
+                    'tf': tf, 'ef': ef,
                     'max': int(r['CARGA_HORÁRIA']), 'atrib': 0, 'ocup': [], 'escolas': set(), 'turnos_ativos': set()
                 })
     return l
@@ -437,7 +458,7 @@ def carregar_rotas(df):
 
 def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
     turno_atual = padronizar(turno_atual)
-    for p in profs: p['ocup'] = [] # Reset ocupação por bloco
+    for p in profs: p['ocup'] = []
     
     demandas = []
     for turma in turmas:
@@ -454,9 +475,7 @@ def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
         grade = {t['nome_turma']: [None]*5 for t in turmas}
         profs_sim = [p.copy() for p in profs]
         for p in profs_sim: 
-            p['ocup'] = list(p['ocup'])
-            p['escolas'] = set(p['escolas'])
-            p['turnos_ativos'] = set(p['turnos_ativos'])
+            p['ocup'] = list(p['ocup']); p['escolas'] = set(p['escolas']); p['turnos_ativos'] = set(p['turnos_ativos'])
         
         random.shuffle(demandas)
         demandas.sort(key=lambda x: x['pri'], reverse=True)
@@ -466,6 +485,8 @@ def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
         for item in demandas:
             turma, mat = item['turma'], item['mat']
             nm_t, esc, reg = turma['nome_turma'], turma['escola_real'], turma['regiao_real']
+            esc_pad = padronizar(esc)
+            reg_pad = padronizar(reg)
             
             slots = [i for i, v in enumerate(grade[nm_t]) if v is None]
             random.shuffle(slots)
@@ -478,48 +499,46 @@ def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
                     candidatos = []
                     for p in profs_sim:
                         if p['mat'] != mat: continue
-                        score = 0
                         
-                        # ALOCAÇÃO INTELIGENTE (CORRIGIDA)
+                        score = 0
                         if p['vin'] == "EFETIVO":
                             if p['tf'] and p['tf'] not in ["AMBOS", ""] and p['tf'] != turno_atual: continue
                             atende = False
                             for ef in p['ef']: 
-                                if padronizar(ef) == padronizar(esc): atende = True
+                                if padronizar(ef) == esc_pad: atende = True
                             if atende: score += 2000
                             else: continue 
                         else:
-                            # DT - Lógica de Expansão
-                            if p['reg'] != reg: continue 
+                            # DT - LÓGICA CORRIGIDA E AGRESSIVA
+                            if p['reg'] != reg_pad: continue 
                             if slot in p['ocup']: continue 
                             if p['atrib'] >= p['max']: continue 
                             
-                            # CRÍTICO: Pontuação para "Quebra de Inércia"
-                            if esc in p['escolas']: score += 1000 # Já está aqui
-                            elif any(x in p['escolas'] for x in rotas.get(esc,[])): score += 500 # Vizinho
-                            elif turno_atual in p['turnos_ativos']: score += 200 # Está no turno
-                            elif len(p['escolas']) == 0: score += 100 # Professor Novo (Prioridade Alta)
-                            else: score += 10 # Expansão natural
+                            if esc_pad in p['escolas']: score += 1000 
+                            elif any(padronizar(x) in p['escolas'] for x in rotas.get(esc_pad,[])): score += 500
+                            elif len(p['escolas']) == 0: score += 1000 # PRIORIDADE: SEM ESCOLA, PEGA ESSA
+                            else: score += 10
                         
                         candidatos.append((score, p))
                     
                     if candidatos:
                         candidatos.sort(key=lambda x: x[0], reverse=True)
-                        escolhido = random.choice([c[1] for c in candidatos if c[0]==candidatos[0][0]])
+                        best_score = candidatos[0][0]
+                        escolhido = random.choice([c[1] for c in candidatos if c[0] == best_score])
                         
-                        lbl = escolhido['nome']
-                        if escolhido['vin'] == "EFETIVO": lbl += " (Ef)"
+                        # ETIQUETA FORMATADA: ID - NOME
+                        lbl = f"{escolhido['id']} - {escolhido['nome']}"
                         grade[nm_t][slot] = f"{mat}\n{lbl}"
                         
                         escolhido['ocup'].append(slot)
                         escolhido['atrib'] += 1
-                        escolhido['escolas'].add(esc)
+                        escolhido['escolas'].add(esc_pad)
                         escolhido['turnos_ativos'].add(turno_atual)
                         alocado = True
                         break
             
             if not alocado:
-                motivo_falha = f"Falta Prof: **{mat}** em {esc}"
+                motivo_falha = f"Falta {mat} em {esc} (Reg: {reg})"
                 sucesso = False
                 break
         
@@ -561,10 +580,7 @@ with t6:
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     merged = pd.merge(dt, dd, on="SÉRIE/ANO", how="inner")
                     escolas = merged['ESCOLA'].unique()
-                    
-                    if len(escolas) == 0:
-                        st.error("Nenhuma turma tem dia de planejamento.")
-                        st.stop()
+                    if len(escolas) == 0: st.error("Erro: Dados incompletos."); st.stop()
                     
                     prog = st.progress(0)
                     for i, esc in enumerate(escolas):
@@ -573,22 +589,19 @@ with t6:
                         df_e = merged[merged['ESCOLA'] == esc]
                         blocos = df_e[['DIA_PLANEJAMENTO', 'TURNO']].drop_duplicates()
                         dados_xls = []
-                        
                         for _, b in blocos.iterrows():
                             dia, turno = b['DIA_PLANEJAMENTO'], b['TURNO']
                             turmas = df_e[(df_e['DIA_PLANEJAMENTO']==dia) & (df_e['TURNO']==turno)]
                             lt = []
                             for _, row in turmas.iterrows(): lt.append({'nome_turma': row['TURMA'], 'ano': row['SÉRIE/ANO'], 'escola_real': esc, 'regiao_real': row['REGIÃO']})
-                            
                             suc, res, err, profs_obj = resolver_grade(lt, dc, profs_obj, rotas_obj, turno)
-                            
                             if suc: dados_xls.append((f"{turno}-{dia}", pd.DataFrame(res)))
                             else: st.warning(f"{esc}: {err}")
-                        
                         if dados_xls:
                             desenhar_xls(writer, esc, dados_xls)
+                            st.write("✅ OK")
+                            for ti, dx in dados_xls: st.caption(ti); st.dataframe(criar_preview_com_recreio(dx), use_container_width=True)
                     
-                    # Atualiza Planilha
                     mapa = {p['id']: ",".join(sorted(list(p['escolas']))) for p in profs_obj}
                     df_new = dp.copy()
                     for idx, r in df_new.iterrows():
@@ -597,8 +610,6 @@ with t6:
                     except: pass
                 
                 status.update(label="Concluído!", state="complete")
-            
             st.success("Feito!")
             buf.seek(0)
             st.download_button("Baixar", buf, "Grades.xlsx")
-            for ti, dx in dados_xls: st.caption(ti); st.dataframe(criar_preview_com_recreio(dx), use_container_width=True)
