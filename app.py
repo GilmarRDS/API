@@ -7,6 +7,7 @@ import re
 import random
 import io
 import xlsxwriter
+import math # Importei matemática para arredondamentos
 
 # ==========================================
 # 1. CONFIGURAÇÕES & ESTILO
@@ -22,6 +23,7 @@ st.markdown("""
     }
     .stButton>button { border-radius: 8px; font-weight: 600; height: 3em; }
     .stDataFrame { border-radius: 10px; overflow: hidden; }
+    .stAlert { border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -38,7 +40,6 @@ ORDEM_SERIES = [
     "1º ANO", "2º ANO", "3º ANO", "4º ANO", "5º ANO"
 ]
 
-# NOMES PADRÃO
 COLS_PADRAO = {
     "Turmas": ["ESCOLA", "NÍVEL", "TURMA", "TURNO", "SÉRIE/ANO", "REGIÃO"],
     "Curriculo": ["SÉRIE/ANO", "COMPONENTE", "QTD_AULAS"],
@@ -173,7 +174,7 @@ with st.sidebar:
 st.markdown("## 🎓 Painel de Controle")
 
 t1, t2, t3, t4, t5, t6 = st.tabs([
-    "📊 Dashboard", "⚙️ Config", "📍 Rotas", 
+    "📊 Dashboard RH", "⚙️ Config", "📍 Rotas", 
     "🏫 Turmas", "👨‍🏫 Professores", "🚀 Gerador"
 ])
 
@@ -183,11 +184,12 @@ def botao_salvar(label, key):
             salvar_seguro(dt, dc, dp, dd, da)
     else: st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
 
-# 1. DASHBOARD / VAGAS
+# 1. DASHBOARD / VAGAS (COM INTELIGÊNCIA DE CONTRATAÇÃO)
 with t1:
     if dt.empty:
         st.info("👋 Cadastre turmas para ver o painel.")
     else:
+        # --- ÁREA DE FILTROS ---
         st.markdown("##### 🔍 Filtros de Visualização")
         c1, c2, c3, c4, c5 = st.columns(5)
         
@@ -214,12 +216,12 @@ with t1:
             if sel_regiao: df_turmas = df_turmas[df_turmas['REGIÃO'].isin(sel_regiao)]
             if sel_escola != "Rede Completa": df_turmas = df_turmas[df_turmas['ESCOLA'] == sel_escola]
             if sel_serie != "Todas": df_turmas = df_turmas[df_turmas['SÉRIE/ANO'] == sel_serie]
-            
             turmas_disp = ["Todas"] + sorted(df_turmas['TURMA'].unique().tolist())
             sel_turma = st.selectbox("🔠 Turma", turmas_disp)
         
         st.markdown("---")
 
+        # --- PROCESSAMENTO ---
         alvo = dt.copy()
         if sel_regiao: alvo = alvo[alvo['REGIÃO'].isin(sel_regiao)]
         if sel_escola != "Rede Completa": alvo = alvo[alvo['ESCOLA'] == sel_escola]
@@ -238,38 +240,74 @@ with t1:
                 total_aulas_demanda += qtd
         
         oferta = {}
-        total_horas_efetivos = 0
+        total_horas_professores = 0
+        
         for _, p in dp.iterrows():
+            if sel_regiao and p['REGIÃO'] not in sel_regiao: continue
             if p['VÍNCULO'] == 'EFETIVO':
-                if sel_regiao and p['REGIÃO'] not in sel_regiao: continue
                 if sel_escola != "Rede Completa" and sel_escola not in str(p['ESCOLAS_ALOCADAS']): continue
-                
-                ms = [limpar_materia(x) for x in str(p['COMPONENTES']).split(',')]
-                ch = int(p['CARGA_HORÁRIA'])
-                for m in ms: oferta[m] = oferta.get(m, 0) + ch
-                total_horas_efetivos += ch
+            
+            ms = [limpar_materia(x) for x in str(p['COMPONENTES']).split(',')]
+            ch_total = int(p['CARGA_HORÁRIA'])
+            
+            if len(ms) > 0:
+                ch_por_materia = ch_total / len(ms)
+                for m in ms: 
+                    oferta[m] = oferta.get(m, 0) + ch_por_materia
+                total_horas_professores += ch_total
         
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Turmas Filtradas", len(alvo))
-        m2.metric("Demanda (Aulas)", total_aulas_demanda)
-        m3.metric("Efetivos (Na Região/Escola)", total_horas_efetivos)
+        # --- PARÂMETROS DE RH ---
+        col_metrics, col_rh = st.columns([3, 1])
         
-        deficit = max(0, total_aulas_demanda - total_horas_efetivos)
-        m4.metric("Déficit (Horas DT)", deficit, delta_color="inverse")
+        with col_rh:
+            st.markdown("⚙️ **Configuração de Contrato**")
+            ch_padrao = st.slider("Carga Horária Padrão (DT)", min_value=10, max_value=60, value=25, help="Use este valor para calcular quantos professores contratar.")
         
-        st.markdown("### 📋 Análise de Vagas")
+        with col_metrics:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Turmas", len(alvo))
+            m2.metric("Demanda (Aulas)", total_aulas_demanda)
+            m3.metric("Oferta (Existente)", int(total_horas_professores))
+            
+            deficit_horas = max(0, total_aulas_demanda - total_horas_professores)
+            profs_estimados_total = math.ceil(deficit_horas / ch_padrao) if deficit_horas > 0 else 0
+            
+            m4.metric("Déficit (Horas)", f"{int(deficit_horas)}h", delta_color="inverse")
+
+        st.info(f"💡 Para cobrir o déficit de **{int(deficit_horas)} horas**, você precisará contratar aproximadamente **{profs_estimados_total} professores** (baseado em contratos de {ch_padrao}h).")
+
+        st.markdown("### 📋 Planejamento de Contratação por Disciplina")
         res = []
         for m, q in dem.items():
             o = oferta.get(m, 0)
-            saldo = max(0, q-o)
-            status = "🔴 Contratar" if saldo > 0 else "🟢 Coberto"
-            res.append({"Disciplina": m, "Demanda": q, "Efetivos": o, "Falta (DT)": saldo, "Status": status})
+            saldo = q - o
+            
+            # Cálculo Inteligente de Contratação
+            if saldo > 0:
+                qtd_contratar = saldo / ch_padrao
+                status = "🔴 Contratar"
+            else:
+                qtd_contratar = 0
+                status = "🟢 Completo"
+                
+            res.append({
+                "Disciplina": m, 
+                "Demanda (h)": q, 
+                "Oferta (h)": round(o, 1), 
+                "Saldo (h)": round(saldo, 1), 
+                "Est. Contratação": round(qtd_contratar, 1),
+                "Situação": status
+            })
         
         df_res = pd.DataFrame(res)
         if not df_res.empty:
             st.dataframe(
                 df_res, use_container_width=True, hide_index=True,
-                column_config={"Falta (DT)": st.column_config.ProgressColumn("Necessidade", format="%d", min_value=0, max_value=max(df_res["Falta (DT)"]) if max(df_res["Falta (DT)"])>0 else 1)}
+                column_config={
+                    "Saldo (h)": st.column_config.NumberColumn("Falta (Horas)", format="%d h"),
+                    "Est. Contratação": st.column_config.NumberColumn("Novos Profs (Qtd)", format="%.1f", help="Número aproximado de professores necessários."),
+                    "Situação": st.column_config.TextColumn("Status")
+                }
             )
         else:
             st.info("Nenhuma demanda encontrada.")
@@ -280,6 +318,7 @@ with t2:
     with col_d:
         with st.container(border=True):
             st.subheader("📅 Dias de Planejamento")
+            st.info("Selecione a linha e aperte **Delete** para apagar.")
             if not dd.empty: dd = st.data_editor(dd, num_rows="dynamic", use_container_width=True, key="edd", hide_index=True)
             with st.popover("➕ Adicionar"):
                 with st.form("fd"):
@@ -292,6 +331,7 @@ with t2:
     with col_c:
         with st.container(border=True):
             st.subheader("📚 Currículo")
+            st.info("Selecione a linha e aperte **Delete** para apagar.")
             if not dc.empty: dc = st.data_editor(dc, num_rows="dynamic", use_container_width=True, key="edc", hide_index=True)
             with st.popover("➕ Adicionar"):
                 with st.form("fc"):
@@ -338,15 +378,14 @@ with t4:
                     dt = pd.concat([dt, pd.DataFrame([{"ESCOLA": padronizar(e), "TURMA": padronizar(t), "TURNO": tn, "SÉRIE/ANO": an, "REGIÃO": rg, "NÍVEL": nv}])], ignore_index=True)
                     salvar_seguro(dt, dc, dp, dd, da)
     if not dt.empty:
+        st.info("🗑️ **Para Excluir:** Selecione a linha (clique no número à esquerda) e aperte **Delete** no teclado.")
         dt = st.data_editor(dt, num_rows="dynamic", use_container_width=True, key="edt", hide_index=True)
         botao_salvar("💾 Salvar Turmas", "btn_save_turmas")
 
-# 5. PROFS (ATUALIZADO COM ESCOLHA CONDICIONAL)
+# 5. PROFS
 with t5:
     with st.expander("➕ Novo Professor", expanded=False):
-        # 1. Radio fora do Form para ser reativo
         tp = st.radio("Vínculo", ["DT", "EFETIVO"], horizontal=True)
-        
         with st.form("fp"):
             c1,c2 = st.columns([1,3])
             cd = c1.text_input("Cod")
@@ -357,24 +396,21 @@ with t5:
             rg = c5.selectbox("Região", REGIOES)
             cm = st.multiselect("Matérias", MATERIAS_ESPECIALISTAS)
             
-            # 2. Lógica Condicional
             if tp == "EFETIVO":
                 ef_esc = st.multiselect("Escola Fixa (Efetivo)", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
                 ef_trn = st.selectbox("Turno Fixo", ["", "MATUTINO", "VESPERTINO", "AMBOS"])
             else:
-                # Se for DT, esconde e zera
                 ef_esc = []
                 ef_trn = ""
                 
             if st.form_submit_button("Salvar"):
                 if sistema_seguro:
-                    # Converte lista de escolas para string se tiver algo
                     str_esc = ",".join(ef_esc) if ef_esc else ""
-                    
                     dp = pd.concat([dp, pd.DataFrame([{"CÓDIGO": cd, "NOME": padronizar(nm), "CARGA_HORÁRIA": ch, "QTD_PL": pl, "REGIÃO": rg, "COMPONENTES": ",".join(cm), "VÍNCULO": tp, "ESCOLAS_ALOCADAS": str_esc, "TURNO_FIXO": ef_trn}])], ignore_index=True)
                     salvar_seguro(dt, dc, dp, dd, da)
                     
     if not dp.empty:
+        st.info("🗑️ **Para Excluir:** Selecione a linha (clique no número à esquerda) e aperte **Delete** no teclado.")
         dp = st.data_editor(dp, num_rows="dynamic", use_container_width=True, key="edp", hide_index=True, column_config={"CARGA_HORÁRIA": st.column_config.NumberColumn("CH"), "QTD_PL": st.column_config.NumberColumn("PL")})
         botao_salvar("💾 Salvar Professores", "btn_save_profs")
 
