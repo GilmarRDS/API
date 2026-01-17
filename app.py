@@ -184,7 +184,7 @@ def botao_salvar(label, key):
             salvar_seguro(dt, dc, dp, dd, da)
     else: st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
 
-# 1. DASHBOARD / VAGAS
+# 1. DASHBOARD
 with t1:
     if dt.empty:
         st.info("👋 Cadastre turmas para ver o painel.")
@@ -437,7 +437,7 @@ def carregar_rotas(df):
 
 def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
     turno_atual = padronizar(turno_atual)
-    for p in profs: p['ocup'] = [] # Reseta ocupação por dia/bloco
+    for p in profs: p['ocup'] = [] # Reset ocupação por bloco
     
     demandas = []
     for turma in turmas:
@@ -480,27 +480,26 @@ def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
                         if p['mat'] != mat: continue
                         score = 0
                         
-                        # --- REGRAS INTELIGENTES ---
+                        # ALOCAÇÃO INTELIGENTE (CORRIGIDA)
                         if p['vin'] == "EFETIVO":
                             if p['tf'] and p['tf'] not in ["AMBOS", ""] and p['tf'] != turno_atual: continue
                             atende = False
-                            for ef in p['ef']:
+                            for ef in p['ef']: 
                                 if padronizar(ef) == padronizar(esc): atende = True
                             if atende: score += 2000
                             else: continue 
                         else:
-                            # DT - Lógica Volante
+                            # DT - Lógica de Expansão
                             if p['reg'] != reg: continue 
                             if slot in p['ocup']: continue 
                             if p['atrib'] >= p['max']: continue 
                             
-                            # Inteligência de Rota e Turno
-                            if esc in p['escolas']: score += 1000 # Já está na escola
-                            elif any(x in p['escolas'] for x in rotas.get(esc,[])): score += 500 # Está na vizinhança
-                            
-                            # Prioriza quem já está nesse turno em outro lugar (para fechar a agenda)
-                            if turno_atual in p['turnos_ativos']: score += 200
-                            elif len(p['escolas']) == 0: score += 50 # Começar novo
+                            # CRÍTICO: Pontuação para "Quebra de Inércia"
+                            if esc in p['escolas']: score += 1000 # Já está aqui
+                            elif any(x in p['escolas'] for x in rotas.get(esc,[])): score += 500 # Vizinho
+                            elif turno_atual in p['turnos_ativos']: score += 200 # Está no turno
+                            elif len(p['escolas']) == 0: score += 100 # Professor Novo (Prioridade Alta)
+                            else: score += 10 # Expansão natural
                         
                         candidatos.append((score, p))
                     
@@ -543,6 +542,14 @@ def desenhar_xls(writer, escola, dados):
             for i, val in enumerate(row): ws.write(r, i+1, val if val else "", fmt)
             r+=1
         r+=1
+
+def criar_preview_com_recreio(df):
+    d = df.copy()
+    top, bot = d.iloc[:3], d.iloc[3:]
+    rec = pd.DataFrame([["RECREIO"]*len(d.columns)], columns=d.columns)
+    final = pd.concat([top, rec, bot]).reset_index(drop=True)
+    final.index = ["1ª", "2ª", "3ª", "INT", "4ª", "5ª"]
+    return final
 
 with t6:
     if sistema_seguro:
@@ -594,3 +601,4 @@ with t6:
             st.success("Feito!")
             buf.seek(0)
             st.download_button("Baixar", buf, "Grades.xlsx")
+            for ti, dx in dados_xls: st.caption(ti); st.dataframe(criar_preview_com_recreio(dx), use_container_width=True)
