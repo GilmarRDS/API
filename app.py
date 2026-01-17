@@ -184,12 +184,11 @@ def botao_salvar(label, key):
             salvar_seguro(dt, dc, dp, dd, da)
     else: st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
 
-# 1. DASHBOARD / VAGAS (TERMINOLOGIA AULA)
+# 1. DASHBOARD / VAGAS
 with t1:
     if dt.empty:
         st.info("👋 Cadastre turmas para ver o painel.")
     else:
-        # --- ÁREA DE FILTROS ---
         st.markdown("##### 🔍 Filtros de Visualização")
         c1, c2, c3, c4, c5 = st.columns(5)
         
@@ -222,7 +221,6 @@ with t1:
         
         st.markdown("---")
 
-        # --- PROCESSAMENTO ---
         alvo = dt.copy()
         if sel_regiao: alvo = alvo[alvo['REGIÃO'].isin(sel_regiao)]
         if sel_escola != "Rede Completa": alvo = alvo[alvo['ESCOLA'] == sel_escola]
@@ -249,7 +247,6 @@ with t1:
                 if sel_escola != "Rede Completa" and sel_escola not in str(p['ESCOLAS_ALOCADAS']): continue
             
             ms = [limpar_materia(x) for x in str(p['COMPONENTES']).split(',')]
-            # Aqui CH agora representa AULAS
             ch_total = int(p['CARGA_HORÁRIA'])
             
             if len(ms) > 0:
@@ -258,12 +255,9 @@ with t1:
                     oferta[m] = oferta.get(m, 0) + ch_por_materia
                 total_aulas_oferta += ch_total
         
-        # --- PARÂMETROS DE RH ---
         col_metrics, col_rh = st.columns([3, 1])
-        
         with col_rh:
             st.markdown("⚙️ **Planejamento**")
-            # Slider ajustado para média de AULAS
             ch_padrao = st.slider("Média de Aulas por Professor", min_value=5, max_value=40, value=20, help="Use este valor para estimar contratações.")
         
         with col_metrics:
@@ -273,7 +267,6 @@ with t1:
             m3.metric("Oferta Atual", f"{int(total_aulas_oferta)} Aulas")
             
             deficit_aulas = max(0, total_aulas_demanda - total_aulas_oferta)
-            # Arredonda para cima (ex: precisa de 2.1 professores -> contrata 3)
             profs_estimados_total = math.ceil(deficit_aulas / ch_padrao) if deficit_aulas > 0 else 0
             
             m4.metric("Déficit Geral", f"{int(deficit_aulas)} Aulas", delta_color="inverse")
@@ -311,7 +304,7 @@ with t1:
                 df_res, use_container_width=True, hide_index=True,
                 column_config={
                     "Saldo (Aulas)": st.column_config.NumberColumn("Falta (Aulas)", format="%d"),
-                    "Est. Contratação": st.column_config.NumberColumn("Novos Profs (Qtd)", format="%.1f", help=f"Considerando {ch_padrao} aulas por professor."),
+                    "Est. Contratação": st.column_config.NumberColumn("Novos Profs (Qtd)", format="%.1f"),
                     "Situação": st.column_config.TextColumn("Status")
                 }
             )
@@ -343,7 +336,7 @@ with t2:
                 with st.form("fc"):
                     a = st.selectbox("Série", ORDEM_SERIES, key="aca")
                     m = st.selectbox("Matéria", MATERIAS_ESPECIALISTAS)
-                    q = st.number_input("Qtd Aulas", 1, 10, 2)
+                    q = st.number_input("Qtd", 1, 10, 2)
                     if st.form_submit_button("Add"):
                         if sistema_seguro:
                             dc = pd.concat([dc, pd.DataFrame([{"SÉRIE/ANO": a, "COMPONENTE": m, "QTD_AULAS": q}])], ignore_index=True)
@@ -397,7 +390,7 @@ with t5:
             cd = c1.text_input("Cod")
             nm = c2.text_input("Nome")
             c3,c4,c5 = st.columns(3)
-            ch = c3.number_input("Qtd. Aulas (Carga)", 1, 60, 20, help="Quantidade total de aulas que o professor pode assumir.")
+            ch = c3.number_input("Qtd. Aulas (Carga)", 1, 60, 20)
             pl = c4.number_input("PL (Planejamento)", 0, 10, 0)
             rg = c5.selectbox("Região", REGIOES)
             cm = st.multiselect("Matérias", MATERIAS_ESPECIALISTAS)
@@ -417,41 +410,35 @@ with t5:
                     
     if not dp.empty:
         st.info("🗑️ **Para Excluir:** Selecione a linha (clique no número à esquerda) e aperte **Delete** no teclado.")
-        
-        # Configuração para mostrar "Aulas" em vez de números puros
-        dp = st.data_editor(
-            dp, 
-            num_rows="dynamic", 
-            use_container_width=True, 
-            key="edp", 
-            hide_index=True, 
-            column_config={
-                "CARGA_HORÁRIA": st.column_config.NumberColumn("Aulas", format="%d"), 
-                "QTD_PL": st.column_config.NumberColumn("PL", format="%d")
-            }
-        )
+        dp = st.data_editor(dp, num_rows="dynamic", use_container_width=True, key="edp", hide_index=True, column_config={"CARGA_HORÁRIA": st.column_config.NumberColumn("Aulas", format="%d"), "QTD_PL": st.column_config.NumberColumn("PL", format="%d")})
         botao_salvar("💾 Salvar Professores", "btn_save_profs")
 
 # 6. GERAR
-def carregar_objetos_professores(df):
-    lista = []
-    for _, row in df.iterrows():
-        mats = [limpar_materia(m) for m in str(row['COMPONENTES']).split(',')]
-        for m in mats:
+def carregar_objs(df):
+    l = []
+    for _, r in df.iterrows():
+        ms = [limpar_materia(m) for m in str(r['COMPONENTES']).split(',')]
+        for m in ms:
             if m in MATERIAS_ESPECIALISTAS:
-                lista.append({'id': str(row['CÓDIGO']), 'nome': row['NOME'], 'materia': m, 'regiao': row['REGIÃO'], 'vinculo': row.get('VÍNCULO','DT'), 'turno_fixo': row.get('TURNO_FIXO',''), 'escolas_fixas': str(row.get('ESCOLAS_ALOCADAS','')).split(','), 'max_aulas': int(row['CARGA_HORÁRIA']), 'aulas_atribuidas': 0, 'horarios_ocupados': [], 'escolas_atendidas_atual': set()})
-    return lista
+                l.append({
+                    'id': str(r['CÓDIGO']), 'nome': r['NOME'], 'mat': m,
+                    'reg': r['REGIÃO'], 'vin': r['VÍNCULO'],
+                    'tf': r['TURNO_FIXO'], 'ef': str(r['ESCOLAS_ALOCADAS']).split(','),
+                    'max': int(r['CARGA_HORÁRIA']), 'atrib': 0, 'ocup': [], 'escolas': set(), 'turnos_ativos': set()
+                })
+    return l
 
-def carregar_mapa_rotas(df):
+def carregar_rotas(df):
     m = {}
     for _, row in df.iterrows():
         escs = str(row['LISTA_ESCOLAS']).split(',')
         for e in escs: m[padronizar(e)] = [padronizar(x) for x in escs]
     return m
 
-def resolver_grade(turmas, curriculo, profs, rotas, turno):
-    turno = padronizar(turno)
-    for p in profs: p['horarios_ocupados'] = []
+def resolver_grade(turmas, curriculo, profs, rotas, turno_atual):
+    turno_atual = padronizar(turno_atual)
+    for p in profs: p['ocup'] = [] # Reseta ocupação por dia/bloco
+    
     demandas = []
     for turma in turmas:
         curr = curriculo[curriculo['SÉRIE/ANO'] == turma['ano']]
@@ -460,58 +447,86 @@ def resolver_grade(turmas, curriculo, profs, rotas, turno):
             if r['QTD_AULAS'] > 0: aulas.extend([limpar_materia(r['COMPONENTE'])] * int(r['QTD_AULAS']))
         while len(aulas) < 5: aulas.append("---")
         for mat in aulas[:5]: demandas.append({'turma': turma, 'mat': mat, 'pri': 0 if mat=="---" else 1})
+    
     demandas.sort(key=lambda x: x['pri'], reverse=True)
+    
     for _ in range(500):
         grade = {t['nome_turma']: [None]*5 for t in turmas}
-        profs_sim = [p.copy() for p in profs] 
-        for p in profs_sim: p['horarios_ocupados'] = list(p['horarios_ocupados']); p['escolas_atendidas_atual'] = set(p['escolas_atendidas_atual'])
+        profs_sim = [p.copy() for p in profs]
+        for p in profs_sim: 
+            p['ocup'] = list(p['ocup'])
+            p['escolas'] = set(p['escolas'])
+            p['turnos_ativos'] = set(p['turnos_ativos'])
+        
         random.shuffle(demandas)
         demandas.sort(key=lambda x: x['pri'], reverse=True)
         sucesso = True
+        motivo_falha = ""
+        
         for item in demandas:
             turma, mat = item['turma'], item['mat']
             nm_t, esc, reg = turma['nome_turma'], turma['escola_real'], turma['regiao_real']
+            
             slots = [i for i, v in enumerate(grade[nm_t]) if v is None]
             random.shuffle(slots)
             alocado = False
+            
             if mat == "---":
                 if slots: grade[nm_t][slots[0]] = "---"; alocado=True
             else:
                 for slot in slots:
                     candidatos = []
                     for p in profs_sim:
-                        if p['materia'] != mat: continue
+                        if p['mat'] != mat: continue
                         score = 0
-                        if p['vinculo'] == "EFETIVO":
-                            if p['turno_fixo'] and p['turno_fixo'] not in ["AMBOS", ""] and p['turno_fixo'] != turno: continue
+                        
+                        # --- REGRAS INTELIGENTES ---
+                        if p['vin'] == "EFETIVO":
+                            if p['tf'] and p['tf'] not in ["AMBOS", ""] and p['tf'] != turno_atual: continue
                             atende = False
-                            for ef in p['escolas_fixas']:
-                                if padronizar(ef) == padronizar(esc): atende=True
+                            for ef in p['ef']:
+                                if padronizar(ef) == padronizar(esc): atende = True
                             if atende: score += 2000
                             else: continue 
                         else:
-                            if p['regiao'] != reg: continue
-                            if slot in p['horarios_ocupados']: continue
-                            if p['aulas_atribuidas'] >= p['max_aulas']: continue
-                            if esc in p['escolas_atendidas_atual']: score += 100
-                            elif any(x in p['escolas_atendidas_atual'] for x in rotas.get(esc,[])): score += 50
-                            elif len(p['escolas_atendidas_atual']) == 0: score += 10
+                            # DT - Lógica Volante
+                            if p['reg'] != reg: continue 
+                            if slot in p['ocup']: continue 
+                            if p['atrib'] >= p['max']: continue 
+                            
+                            # Inteligência de Rota e Turno
+                            if esc in p['escolas']: score += 1000 # Já está na escola
+                            elif any(x in p['escolas'] for x in rotas.get(esc,[])): score += 500 # Está na vizinhança
+                            
+                            # Prioriza quem já está nesse turno em outro lugar (para fechar a agenda)
+                            if turno_atual in p['turnos_ativos']: score += 200
+                            elif len(p['escolas']) == 0: score += 50 # Começar novo
+                        
                         candidatos.append((score, p))
+                    
                     if candidatos:
                         candidatos.sort(key=lambda x: x[0], reverse=True)
-                        best = candidatos[0][0]
-                        escolhido = random.choice([c[1] for c in candidatos if c[0]==best])
+                        escolhido = random.choice([c[1] for c in candidatos if c[0]==candidatos[0][0]])
+                        
                         lbl = escolhido['nome']
-                        if escolhido['vinculo'] == "EFETIVO": lbl += " (Ef)"
+                        if escolhido['vin'] == "EFETIVO": lbl += " (Ef)"
                         grade[nm_t][slot] = f"{mat}\n{lbl}"
-                        escolhido['horarios_ocupados'].append(slot)
-                        escolhido['aulas_atribuidas'] += 1
-                        escolhido['escolas_atendidas_atual'].add(esc)
+                        
+                        escolhido['ocup'].append(slot)
+                        escolhido['atrib'] += 1
+                        escolhido['escolas'].add(esc)
+                        escolhido['turnos_ativos'].add(turno_atual)
                         alocado = True
                         break
-            if not alocado: sucesso=False; break
+            
+            if not alocado:
+                motivo_falha = f"Falta Prof: **{mat}** em {esc}"
+                sucesso = False
+                break
+        
         if sucesso: return True, grade, None, profs_sim
-    return False, None, "Não foi possível alocar.", []
+        
+    return False, None, motivo_falha, []
 
 def desenhar_xls(writer, escola, dados):
     wb = writer.book
@@ -529,56 +544,53 @@ def desenhar_xls(writer, escola, dados):
             r+=1
         r+=1
 
-def criar_preview_com_recreio(df):
-    d = df.copy()
-    top, bot = d.iloc[:3], d.iloc[3:]
-    rec = pd.DataFrame([["RECREIO"]*len(d.columns)], columns=d.columns)
-    final = pd.concat([top, rec, bot]).reset_index(drop=True)
-    final.index = ["1ª", "2ª", "3ª", "INT", "4ª", "5ª"]
-    return final
-
 with t6:
-    st.markdown("### 🚀 Processamento")
     if sistema_seguro:
-        if st.button("Iniciar Geração", type="primary", use_container_width=True):
-            with st.status("Processando...", expanded=True) as status:
-                profs_obj = carregar_objetos_professores(dp)
-                rotas_obj = carregar_mapa_rotas(da)
+        if st.button("🚀 Gerar Grade"):
+            with st.status("Gerando...", expanded=True) as status:
+                profs_obj = carregar_objs(dp)
+                rotas_obj = carregar_rotas(da)
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                     merged = pd.merge(dt, dd, on="SÉRIE/ANO", how="inner")
                     escolas = merged['ESCOLA'].unique()
-                    if len(escolas)==0: 
-                        st.error("Erro: Nenhuma turma tem dia de planejamento.")
-                        status.update(label="Falha", state="error"); st.stop()
+                    
+                    if len(escolas) == 0:
+                        st.error("Nenhuma turma tem dia de planejamento.")
+                        st.stop()
+                    
                     prog = st.progress(0)
                     for i, esc in enumerate(escolas):
-                        st.write(f"🏫 {esc}...")
                         prog.progress((i+1)/len(escolas))
+                        st.write(f"Processando {esc}...")
                         df_e = merged[merged['ESCOLA'] == esc]
                         blocos = df_e[['DIA_PLANEJAMENTO', 'TURNO']].drop_duplicates()
                         dados_xls = []
+                        
                         for _, b in blocos.iterrows():
                             dia, turno = b['DIA_PLANEJAMENTO'], b['TURNO']
                             turmas = df_e[(df_e['DIA_PLANEJAMENTO']==dia) & (df_e['TURNO']==turno)]
                             lt = []
                             for _, row in turmas.iterrows(): lt.append({'nome_turma': row['TURMA'], 'ano': row['SÉRIE/ANO'], 'escola_real': esc, 'regiao_real': row['REGIÃO']})
+                            
                             suc, res, err, profs_obj = resolver_grade(lt, dc, profs_obj, rotas_obj, turno)
+                            
                             if suc: dados_xls.append((f"{turno}-{dia}", pd.DataFrame(res)))
                             else: st.warning(f"{esc}: {err}")
+                        
                         if dados_xls:
                             desenhar_xls(writer, esc, dados_xls)
-                            st.write(f"✅ Feito")
-                            for ti, dx in dados_xls: st.caption(ti); st.dataframe(criar_preview_com_recreio(dx), use_container_width=True)
-                    st.write("🔗 Atualizando vínculos...")
-                    mapa = {p['id']: ",".join(sorted(list(p['escolas_atendidas_atual']))) for p in profs_obj}
+                    
+                    # Atualiza Planilha
+                    mapa = {p['id']: ",".join(sorted(list(p['escolas']))) for p in profs_obj}
                     df_new = dp.copy()
                     for idx, r in df_new.iterrows():
                         if str(r['CÓDIGO']) in mapa: df_new.at[idx, 'ESCOLAS_ALOCADAS'] = mapa[str(r['CÓDIGO'])]
                     try: conn.update(worksheet="Professores", data=df_new)
                     except: pass
-                status.update(label="Concluído!", state="complete", expanded=False)
-            st.success("Grades geradas!")
+                
+                status.update(label="Concluído!", state="complete")
+            
+            st.success("Feito!")
             buf.seek(0)
-            st.download_button("📥 Baixar Excel", buf, "Grades.xlsx", use_container_width=True)
-    else: st.error("Corrija as abas.")
+            st.download_button("Baixar", buf, "Grades.xlsx")
