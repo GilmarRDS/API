@@ -691,8 +691,10 @@ with t5:
 # 6. GERADOR COM DEPURAÇÃO
 with t6:
     if sistema_seguro:
+        # Seção de depuração
         st.subheader("🔍 Depuração da Demanda")
         
+        # Calcular demanda real
         total_aulas_especialistas = 0
         detalhes_demanda = []
         
@@ -725,10 +727,11 @@ with t6:
                 rotas_obj = carregar_rotas(da)
                 map_esc_reg = dict(zip(dt['ESCOLA'], dt['REGIÃO']))
                 
+                # CORREÇÃO 1: Usar left merge para incluir todas as turmas
                 merged = pd.merge(dt, dd, on="SÉRIE/ANO", how="left").fillna({'DIA_PLANEJAMENTO': 'NÃO CONFIGURADO'})
                 escolas = merged['ESCOLA'].unique()
                 
-                # Resetar estado INICIAL dos professores
+                # CORREÇÃO 4: Resetar o estado dos professores APENAS UMA VEZ
                 for p in profs_obj:
                     p['ocup'] = {}
                     p['atrib'] = 0
@@ -739,13 +742,11 @@ with t6:
                 novos_horarios = []
                 escolas_processadas = 0
                 
-                # CORREÇÃO: Usar flag para NÃO criar professores durante resolução
-                CRIAR_TEMPORARIOS = False
-                
                 for esc in escolas:
                     status.write(f"  • Processando escola: {esc}")
                     df_e = merged[merged['ESCOLA'] == esc]
                     
+                    # Iterar sobre todos os dias/turnos únicos para a escola
                     for _, b in df_e[['DIA_PLANEJAMENTO', 'TURNO']].drop_duplicates().iterrows():
                         dia, turno = b['DIA_PLANEJAMENTO'], b['TURNO']
                         turmas_f = df_e[(df_e['DIA_PLANEJAMENTO']==dia) & (df_e['TURNO']==turno)]
@@ -757,11 +758,7 @@ with t6:
                             'regiao_real': r['REGIÃO']
                         } for _, r in turmas_f.iterrows()]
                         
-                        # Resetar ocup antes de cada dia/turno
-                        for p in profs_obj:
-                            p['ocup'] = {}
-                        
-                        # Resolve a grade SEM criar novos professores
+                        # A função resolver_grade_inteligente agora acumula o estado em profs_obj
                         sucesso, res, mensagem, profs_obj = resolver_grade_inteligente(
                             lt, dc, profs_obj, rotas_obj, turno, map_esc_reg
                         )
@@ -773,121 +770,39 @@ with t6:
                     
                     escolas_processadas += 1
                 
-                # ===== FASE 2: CONSOLIDAR VAGAS NÃO PREENCHIDAS E CRIAR PROFESSORES =====
-                status.write("📊 Analisando demanda não atendida...")
-                
-                # Contar demanda não preenchida por região/matéria
-                demanda_nao_preenchida = {}
-                
-                for _, row in pd.DataFrame(novos_horarios, columns=COLS_PADRAO["Horario"]).iterrows():
-                    for col in ['1ª', '2ª', '3ª', '4ª', '5ª']:
-                        prof_id = row[col]
-                        if prof_id == '---':
-                            # Encontrar qual era a demanda original
-                            esc = row['ESCOLA']
-                            turma = row['TURMA']
-                            turno = row['TURNO']
-                            dia = row['DIA']
-                            
-                            # Procurar na estrutura de turmas qual matéria falta
-                            df_turma = dt[(dt['ESCOLA'] == esc) & (dt['TURMA'] == turma)]
-                            if not df_turma.empty:
-                                serie = df_turma.iloc[0]['SÉRIE/ANO']
-                                regiao = df_turma.iloc[0]['REGIÃO']
-                                curr = dc[dc['SÉRIE/ANO'] == serie]
-                                
-                                for _, item in curr.iterrows():
-                                    mat = padronizar_materia_interna(item['COMPONENTE'])
-                                    if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                                        chave = (padronizar(regiao), mat)
-                                        demanda_nao_preenchida[chave] = demanda_nao_preenchida.get(chave, 0) + 1
-                
-                status.write(f"Demanda não preenchida: {demanda_nao_preenchida}")
-                
-                # ===== CRIAR NOVOS PROFESSORES CONSOLIDADOS =====
-                if demanda_nao_preenchida:
-                    status.write("🔄 Criando novos professores consolidados...")
-                    
-                    novos_profs = []
-                    numeros_existentes = []
-                    
-                    for p in profs_obj:
-                        match = re.search(r'P(\d+)', p['id'])
-                        if match:
-                            numeros_existentes.append(int(match.group(1)))
-                    
-                    proximo_numero = max(numeros_existentes) + 1 if numeros_existentes else 1
-                    
-                    for (reg, mat), qtd_aulas in sorted(demanda_nao_preenchida.items()):
-                        if qtd_aulas <= 0:
-                            continue
-                        
-                        # Aplicar regras de carga
-                        carga_min, carga_max, media_alvo = 14, 30, 20
-                        
-                        # Quantos professores necessários?
-                        qtd_profs = max(1, math.ceil(qtd_aulas / media_alvo))
-                        carga_por_prof = qtd_aulas / qtd_profs
-                        
-                        # Ajustar para respeitar limites
-                        while qtd_profs > 1 and carga_por_prof < carga_min:
-                            qtd_profs -= 1
-                            carga_por_prof = qtd_aulas / qtd_profs
-                        
-                        while carga_por_prof > carga_max:
-                            qtd_profs += 1
-                            carga_por_prof = qtd_aulas / qtd_profs
-                        
-                        # Distribuir carga
-                        cargas = []
-                        restante = qtd_aulas
-                        
-                        for i in range(qtd_profs):
-                            if i == qtd_profs - 1:
-                                carga = restante
-                            else:
-                                carga = min(carga_max, max(carga_min, round(carga_por_prof)))
-                                restante -= carga
-                            cargas.append(max(1, carga))
-                        
-                        # Criar os professores
-                        escolas_regiao = list(set(dt[dt['REGIÃO'] == reg]['ESCOLA'].unique()))
-                        
-                        for i, carga in enumerate(cargas):
-                            if carga > 0:
-                                cod = gerar_codigo_padrao(proximo_numero, "DT", reg, mat)
-                                proximo_numero += 1
-                                
-                                novos_profs.append({
-                                    "CÓDIGO": cod,
-                                    "NOME": f"VAGA {mat} {reg}",
-                                    "COMPONENTES": mat,
-                                    "CARGA_HORÁRIA": carga,
-                                    "REGIÃO": reg,
-                                    "VÍNCULO": "DT",
-                                    "TURNO_FIXO": "",
-                                    "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]),
-                                    "QTD_PL": 0
-                                })
-                                
-                                status.write(f"  ✅ {cod}: {carga}h ({mat} - {reg})")
-                    
-                    # Adicionar novos professores ao dataframe
-                    if novos_profs:
-                        dp_com_novos = pd.concat([dp, pd.DataFrame(novos_profs)], ignore_index=True)
-                    else:
-                        dp_com_novos = dp
-                else:
-                    dp_com_novos = dp
-                
                 df_horario = pd.DataFrame(novos_horarios, columns=COLS_PADRAO["Horario"])
                 
+                # Atualizar professores
+                profs_finais_list = []
+                ids_existentes = set(dp['CÓDIGO'].astype(str))
+                
+                for p in profs_obj:
+                    if p['id'] in ids_existentes:
+                        idx = dp[dp['CÓDIGO'] == p['id']].index[0]
+                        dados_originais = dp.iloc[idx].to_dict()
+                        dados_originais['CARGA_HORÁRIA'] = p['atrib']
+                        dados_originais['ESCOLAS_ALOCADAS'] = ",".join(list(p['escolas_reais']))
+                        profs_finais_list.append(dados_originais)
+                    else:
+                        profs_finais_list.append({
+                            "CÓDIGO": p['id'],
+                            "NOME": p['nome'],
+                            "COMPONENTES": list(p['mats'])[0] if p['mats'] else "",
+                            "CARGA_HORÁRIA": p['atrib'],
+                            "REGIÃO": p['reg'],
+                            "VÍNCULO": p['vin'],
+                            "TURNO_FIXO": p['tf'],
+                            "ESCOLAS_ALOCADAS": ",".join(list(p['escolas_reais'])),
+                            "QTD_PL": 0
+                        })
+                
+                dp_atualizado = pd.DataFrame(profs_finais_list)
+                
                 status.write("💾 Salvando no banco de dados...")
-                salvar_seguro(dt, dc, dp_com_novos, dd, da, df_horario)
+                salvar_seguro(dt, dc, dp_atualizado, dd, da, df_horario)
                 
                 status.update(label="✅ Grade Gerada com Sucesso!", state="complete", expanded=False)
                 st.success(f"Processamento concluído! {escolas_processadas} escolas processadas.")
-
 
 # 7. VER HORÁRIO
 with t7:
