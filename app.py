@@ -1,15 +1,39 @@
+"""
+Sistema de Gestão Escolar - Gerador de Horários
+Aplicação Streamlit para gestão de turmas, professores e geração automática de horários.
+"""
+
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import time
 from datetime import datetime
+from typing import Tuple, List, Dict, Optional
 import re
 import random
 import io
 import xlsxwriter
 import math
 import copy
-import unicodedata
+import gspread
+from google.oauth2 import service_account
+
+# Importar configurações e utilitários
+from config import (
+    REGIOES, MATERIAS_ESPECIALISTAS, ORDEM_SERIES, DIAS_SEMANA, VINCULOS,
+    COLS_PADRAO, CARGA_MINIMA_PADRAO, CARGA_MAXIMA_PADRAO, MEDIA_ALVO_PADRAO,
+    MAX_TENTATIVAS_ALOCACAO, LIMITE_NOVOS_PROFESSORES, CACHE_TTL_SEGUNDOS, SLOTS_AULA
+)
+from utils import (
+    remover_acentos, padronizar, limpar_materia, padronizar_materia_interna,
+    gerar_sigla_regiao, gerar_sigla_materia, gerar_codigo_padrao,
+    extrair_id_do_link, validar_dataframe
+)
+from regras_alocacao import (
+    verificar_compatibilidade_regiao, verificar_janelas,
+    calcular_pl_ldb, calcular_carga_total,
+    verificar_limites_carga, distribuir_carga_inteligente,
+    REGRA_CARGA_HORARIA, REGRA_DISTRIBUICAO
+)
 
 # ==========================================
 # 1. CONFIGURAÇÕES & ESTILO
@@ -18,6 +42,15 @@ st.set_page_config(page_title="Gerador Escolar Pro", page_icon="🎓", layout="w
 
 if 'hora_db' not in st.session_state:
     st.session_state['hora_db'] = datetime.now().strftime("%H:%M")
+
+# Botão de emergência para limpar cache (sempre visível)
+col_emergencia1, col_emergencia2 = st.columns([1, 5])
+with col_emergencia1:
+    if st.button("🚨 Reset Sistema", help="Limpa todo cache e recarrega dados do zero", type="primary"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.success("✅ Sistema resetado! Recarregue a página.")
+        st.rerun()
 
 st.markdown("""
 <style>
@@ -32,136 +65,817 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. DEFINIÇÕES GLOBAIS
+# 4. CONEXÃO COM GOOGLE SHEETS
 # ==========================================
-REGIOES = ["FUNDÃO", "PRAIA GRANDE", "TIMBUÍ"]
-MATERIAS_ESPECIALISTAS = ["ARTE", "EDUCAÇÃO FÍSICA", "ENSINO RELIGIOSO", "LÍNGUA INGLESA", "CONTAÇÃO DE HISTÓRIA"]
-ORDEM_SERIES = ["BERÇÁRIO", "CRECHE I", "CRECHE II", "CRECHE III", "PRÉ I", "PRÉ II", "1º ANO", "2º ANO", "3º ANO", "4º ANO", "5º ANO"]
-
-COLS_PADRAO = {
-    "Turmas": ["ESCOLA", "NÍVEL", "TURMA", "TURNO", "SÉRIE/ANO", "REGIÃO"],
-    "Curriculo": ["SÉRIE/ANO", "COMPONENTE", "QTD_AULAS"],
-    "Professores": ["CÓDIGO", "NOME", "COMPONENTES", "CARGA_HORÁRIA", "REGIÃO", "VÍNCULO", "TURNO_FIXO", "ESCOLAS_ALOCADAS", "QTD_PL"],
-    "ConfigDias": ["SÉRIE/ANO", "DIA_PLANEJAMENTO"],
-    "Agrupamentos": ["NOME_ROTA", "LISTA_ESCOLAS"],
-    "Horario": ["ESCOLA", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"]
-}
-
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-# ==========================================
-# 3. UTILITÁRIOS
-# ==========================================
-def remover_acentos(texto):
-    if not isinstance(texto, str): return str(texto)
-    nfkd = unicodedata.normalize('NFKD', texto)
-    return "".join([c for c in nfkd if not unicodedata.combining(c)])
-
-def padronizar(texto):
-    if pd.isna(texto): return ""
-    txt = remover_acentos(str(texto).upper().strip())
-    if txt == "NAN": return ""
-    return " ".join(txt.split())
-
-def limpar_materia(nome):
-    nome_padrao = padronizar(nome)
-    if "ART" in nome_padrao: return "ARTE"
-    if "FISICA" in nome_padrao: return "EDUCAÇÃO FÍSICA"
-    if "INGLE" in nome_padrao: return "LÍNGUA INGLESA"
-    if "RELIGIO" in nome_padrao: return "ENSINO RELIGIOSO"
-    if "HIST" in nome_padrao and "CONTA" in nome_padrao: return "CONTAÇÃO DE HISTÓRIA"
-    return nome
-
-def padronizar_materia_interna(nome):
-    return remover_acentos(limpar_materia(nome)).upper()
-
-def gerar_sigla_regiao(regiao):
-    reg = padronizar(regiao)
-    if "PRAIA" in reg: return "P"
-    if "FUND" in reg: return "F"
-    if "TIMB" in reg: return "T"
-    return "X"
-
-def gerar_sigla_materia(nome):
-    nome = padronizar(nome)
-    if "ART" in nome: return "ARTE"
-    if "FISICA" in nome: return "EDFI"
-    if "INGLE" in nome: return "LIIN"
-    if "RELIGIO" in nome: return "ENRE"
-    if "HIST" in nome and "CONTA" in nome: return "COHI"
-    palavras = nome.split()
-    if len(palavras) > 1:
-        return (palavras[0][:2] + palavras[1][:2]).upper()
-    return nome[:4].upper()
-
-def gerar_codigo_padrao(numero, tipo, regiao, materia):
-    t = "D" if tipo == "DT" else "E"
-    r = gerar_sigla_regiao(regiao)
-    m = gerar_sigla_materia(materia)
-    return f"P{numero}{t}{r}{m}"
-
-# ==========================================
-# 4. LEITURA DE DADOS
-# ==========================================
-def ler_aba_segura(aba, colunas_esperadas):
+@st.cache_resource
+def init_gsheets_connection():
+    """
+    Inicializa a conexão com Google Sheets.
+    
+    Suporta múltiplas estruturas de configuração:
+    - [connections.gsheets] (recomendado)
+    - [gcp_service_account]
+    - Estrutura direta no secrets
+    
+    Returns:
+        tuple: (client, planilha_id) ou (None, None) em caso de erro
+    """
     try:
-        df = conn.read(worksheet=aba, ttl=0)
-        if df.empty: return pd.DataFrame(columns=colunas_esperadas), True
-        df.columns = [padronizar(c) for c in df.columns]
-        cols_padrao_norm = [padronizar(c) for c in colunas_esperadas]
-        mapa_cols = {}
-        for c_esperada, c_norm in zip(colunas_esperadas, cols_padrao_norm):
-            if c_norm in df.columns: mapa_cols[c_norm] = c_esperada
-        df = df.rename(columns=mapa_cols)
-        for col in colunas_esperadas:
-            if col not in df.columns: return pd.DataFrame(), False
-        df = df[colunas_esperadas].dropna(how='all').fillna("")
-        for c in df.columns:
-            if c in ["QTD_AULAS", "CARGA_HORÁRIA", "QTD_PL"]:
-                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
+        # VERIFICAR ESTRUTURA [connections.gsheets]
+        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+            conn_secrets = st.secrets["connections"]["gsheets"]
+            
+            # Verificar se temos todas as credenciais necessárias
+            creds_necessarias = ["type", "project_id", "private_key_id", "private_key", 
+                               "client_email", "client_id", "spreadsheet"]
+            
+            for cred in creds_necessarias:
+                if cred not in conn_secrets:
+                    st.error(f"❌ '{cred}' não encontrado em [connections.gsheets]")
+                    return None, None
+            
+            # Extrair o ID da planilha
+            spreadsheet_url = conn_secrets.get("spreadsheet", "")
+            PLANILHA_ID = extrair_id_do_link(spreadsheet_url)
+            
+            if not PLANILHA_ID:
+                st.error("❌ Não foi possível extrair o ID da planilha")
+                st.info(f"URL fornecida: {spreadsheet_url}")
+                st.info("💡 Dica: Certifique-se de que o link está completo e no formato correto")
+                return None, None
+            
+            # Debug: mostrar ID extraído (apenas no desenvolvimento)
+            if st.secrets.get("DEBUG", False):
+                st.sidebar.info(f"🔍 ID extraído: {PLANILHA_ID}")
+            
+            # Criar dicionário de credenciais
+            credentials_dict = {
+                "type": conn_secrets["type"],
+                "project_id": conn_secrets["project_id"],
+                "private_key_id": conn_secrets["private_key_id"],
+                "private_key": conn_secrets["private_key"].replace('\\n', '\n'),
+                "client_email": conn_secrets["client_email"],
+                "client_id": conn_secrets["client_id"],
+                "auth_uri": conn_secrets.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+                "token_uri": conn_secrets.get("token_uri", "https://oauth2.googleapis.com/token"),
+                "auth_provider_x509_cert_url": conn_secrets.get("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs"),
+                "client_x509_cert_url": conn_secrets.get("client_x509_cert_url", f"https://www.googleapis.com/robot/v1/metadata/x509/{conn_secrets['client_email'].replace('@', '%40')}")
+            }
+        
+        # TENTATIVA 2: Verificar se temos gcp_service_account
+        elif "gcp_service_account" in st.secrets:
+            credentials_dict = dict(st.secrets["gcp_service_account"])
+            
+            # Verificar se temos o ID da planilha
+            if "PLANILHA_ID" in st.secrets:
+                PLANILHA_ID = st.secrets["PLANILHA_ID"]
+            elif "spreadsheet" in credentials_dict:
+                PLANILHA_ID = extrair_id_do_link(credentials_dict["spreadsheet"])
             else:
-                df[c] = df[c].astype(str).apply(padronizar)
-        return df, True
-    except: return pd.DataFrame(), False
+                st.error("❌ Não encontrado: PLANILHA_ID ou spreadsheet")
+                return None, None
+        
+        # TENTATIVA 3: Verificar se temos credenciais diretas
+        elif all(key in st.secrets for key in ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id"]):
+            credentials_dict = {
+                "type": st.secrets["type"],
+                "project_id": st.secrets["project_id"],
+                "private_key_id": st.secrets["private_key_id"],
+                "private_key": st.secrets["private_key"].replace('\\n', '\n'),
+                "client_email": st.secrets["client_email"],
+                "client_id": st.secrets["client_id"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{st.secrets['client_email'].replace('@', '%40')}"
+            }
+            
+            # Obter ID da planilha
+            if "PLANILHA_ID" in st.secrets:
+                PLANILHA_ID = st.secrets["PLANILHA_ID"]
+            elif "spreadsheet" in st.secrets:
+                PLANILHA_ID = extrair_id_do_link(st.secrets["spreadsheet"])
+            else:
+                st.error("❌ Não encontrado: PLANILHA_ID ou spreadsheet")
+                return None, None
+        
+        # NENHUMA ESTRUTURA ENCONTRADA
+        else:
+            st.error("❌ Nenhuma estrutura de credenciais encontrada")
+            st.write("**Estruturas verificadas:**")
+            if "connections" in st.secrets:
+                st.write("- [connections] encontrado")
+                if "gsheets" in st.secrets["connections"]:
+                    st.write("  - [gsheets] encontrado dentro de connections")
+            if "gcp_service_account" in st.secrets:
+                st.write("- [gcp_service_account] encontrado")
+            
+            # Mostrar todas as chaves disponíveis
+            st.write("**Todas as chaves no secrets.toml:**")
+            for key in st.secrets:
+                st.write(f"- {key}")
+            
+            return None, None
+        
+        # CRIAR CREDENCIAIS
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_dict,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
+        
+        # CONECTAR AO GOOGLE SHEETS
+        client = gspread.authorize(credentials)
+        
+        # TESTAR A CONEXÃO (com retry)
+        max_retries = 3
+        for tentativa in range(max_retries):
+            try:
+                spreadsheet = client.open_by_key(PLANILHA_ID)
+                st.sidebar.success(f"✅ Conectado!")
+                st.sidebar.caption(f"📋 {spreadsheet.title}")
+                return client, PLANILHA_ID
+            except Exception as e:
+                error_msg = str(e)
+                
+                # Se não for o último retry, tenta novamente
+                if tentativa < max_retries - 1:
+                    time.sleep(1)  # Aguarda 1 segundo antes de tentar novamente
+                    continue
+                
+                # Última tentativa falhou, mostra erro detalhado
+                st.error(f"❌ Erro ao acessar planilha (tentativa {tentativa + 1}/{max_retries}): {error_msg}")
+                
+                # Detectar tipo de erro específico
+                if any(keyword in error_msg for keyword in ["Failed to resolve", "getaddrinfo failed", "NameResolutionError"]):
+                    st.error("""
+                    ## 🌐 Problema de DNS/Conectividade Detectado
+                    
+                    O Python não conseguiu resolver o DNS, mas o ping funciona.
+                    Isso pode indicar:
+                    - Problema com configuração de DNS do Python
+                    - Firewall bloqueando conexões HTTPS do Python especificamente
+                    - Problema temporário de DNS
+                    
+                    **💡 Soluções:**
+                    1. Reinicie o Streamlit completamente
+                    2. Verifique se há proxy configurado no sistema
+                    3. Tente novamente em alguns minutos
+                    4. Verifique se o Windows Firewall está bloqueando Python
+                    """)
+                elif "ConnectionPool" in error_msg or "Max retries exceeded" in error_msg:
+                    st.warning("""
+                    ## ⚠️ Problema de Conexão HTTPS Detectado
+                    
+                    ✅ **O ping funciona** (conectividade OK)  
+                    ❌ **Mas HTTPS falha** (problema específico)
+                    
+                    **🔍 Diagnóstico:**
+                    - DNS está funcionando ✅
+                    - Conectividade básica OK ✅  
+                    - HTTPS bloqueado ou com problema ❌
+                    
+                    **💡 Soluções (tente nesta ordem):**
+                    
+                    1. **Reinicie o Streamlit completamente**
+                       - Feche todas as janelas do Streamlit
+                       - Abra novamente: `streamlit run app.py`
+                       
+                    2. **Verifique Windows Firewall:**
+                       - Abra "Firewall do Windows Defender com Segurança Avançada"
+                       - Procure por regras bloqueando Python.exe
+                       - Tente permitir temporariamente para testar
+                       
+                    3. **Teste HTTPS no PowerShell:**
+                       ```powershell
+                       Invoke-WebRequest -Uri https://sheets.googleapis.com
+                       ```
+                       - Se funcionar: problema específico do Python/gspread
+                       - Se não funcionar: problema de rede/firewall
+                       
+                    4. **Configure proxy (se em rede corporativa):**
+                       - Verifique se precisa de proxy
+                       - Configure variáveis de ambiente se necessário
+                       
+                    5. **Atualize bibliotecas:**
+                       ```bash
+                       pip install --upgrade gspread google-auth requests urllib3
+                       ```
+                    """)
+                elif "Permission denied" in error_msg or "403" in error_msg or "insufficient permissions" in error_msg.lower():
+                    st.warning("""
+                    **🔐 Problema de Permissão Detectado**
+                    
+                    A Service Account não tem permissão para acessar a planilha.
+                    """)
+                    if "client_email" in credentials_dict:
+                        st.info(f"**📧 Compartilhe sua planilha com:** `{credentials_dict['client_email']}`")
+                        st.info("**Permissão necessária:** Editor")
+                elif "404" in error_msg or "not found" in error_msg.lower():
+                    st.warning("""
+                    **📋 Planilha Não Encontrada**
+                    
+                    O ID da planilha pode estar incorreto ou a planilha foi deletada.
+                    """)
+                else:
+                    # Erro genérico
+                    if "client_email" in credentials_dict:
+                        st.info(f"**📧 Compartilhe sua planilha com:** `{credentials_dict['client_email']}`")
+                        st.info("**Permissão necessária:** Editor")
+                
+                return None, None
+            
+    except Exception as e:
+        st.error(f"❌ Erro na conexão: {str(e)}")
+        return None, None
 
-@st.cache_data(ttl=60, show_spinner=False)
+# Inicializar conexão
+gs_client, PLANILHA_ID = init_gsheets_connection()
+
+# ==========================================
+# 5. VERIFICAR E AJUSTAR SECRETS.TOML
+# ==========================================
+if gs_client is None or not PLANILHA_ID:
+    st.error("""
+    ## ⚠️ Conexão não estabelecida
+    
+    **Seu `secrets.toml` parece estar assim:**
+    ```toml
+    [connections.gsheets]
+    spreadsheet = "COLE_AQUI_O_LINK_DA_SUA_PLANILHA"
+    type = "service_account"
+    project_id = "seu-project-id"
+    private_key_id = "sua-chave-id"
+    private_key = "-----BEGIN PRIVATE KEY-----\\nsua-chave-privada-aqui\\n-----END PRIVATE KEY-----\\n"
+    client_email = "seu-email@projeto.iam.gserviceaccount.com"
+    client_id = "seu-client-id"
+    auth_uri = "https://accounts.google.com/o/oauth2/auth"
+    token_uri = "https://oauth2.googleapis.com/token"
+    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+    client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/seu-email%40projeto.iam.gserviceaccount.com"
+    ```
+    
+    **Para corrigir:**
+    
+    1. **Cole o link da sua planilha** no campo `spreadsheet = `
+    2. **Preencha todas as credenciais** da sua Service Account
+    3. **Compartilhe a planilha** com o email do `client_email`
+    4. **Dê permissão de Editor**
+    5. **Recarregue a página**
+    
+    **Exemplo de link correto:**
+    ```
+    spreadsheet = "https://docs.google.com/spreadsheets/d/1A2B3C4D5E6F/edit"
+    ```
+    
+    **Status atual do seu secrets.toml:**
+    """)
+    
+    # Mostrar estrutura atual e diagnóstico detalhado
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        conn = st.secrets["connections"]["gsheets"]
+        st.write("**Estrutura [connections.gsheets] encontrada:**")
+        
+        # Verificar cada campo
+        campos_ok = True
+        for key in ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "spreadsheet"]:
+            value = str(conn.get(key, ""))
+            if "key" in key.lower() or "private" in key.lower():
+                if value and len(value) > 10:
+                    st.write(f"- `{key}`: ✅ Configurado (valor mascarado)")
+                else:
+                    st.write(f"- `{key}`: ❌ Vazio ou inválido")
+                    campos_ok = False
+            elif key == "spreadsheet":
+                if value and "http" in value:
+                    # Tentar extrair ID para validar
+                    test_id = extrair_id_do_link(value)
+                    if test_id:
+                        st.write(f"- `{key}`: ✅ {value[:50]}... (ID: {test_id[:20]}...)")
+                    else:
+                        st.write(f"- `{key}`: ⚠️ Link encontrado mas ID não pôde ser extraído")
+                        st.write(f"  Link completo: `{value}`")
+                        campos_ok = False
+                else:
+                    st.write(f"- `{key}`: ❌ Vazio ou inválido")
+                    campos_ok = False
+            else:
+                if value:
+                    st.write(f"- `{key}`: ✅ Configurado")
+                else:
+                    st.write(f"- `{key}`: ❌ Vazio")
+                    campos_ok = False
+        
+        # Verificar se a planilha foi compartilhada
+        if campos_ok and "client_email" in conn:
+            st.info(f"""
+            **📧 Verifique se a planilha foi compartilhada:**
+            
+            Email da Service Account: `{conn['client_email']}`
+            
+            **Passos:**
+            1. Abra sua planilha no Google Sheets
+            2. Clique em "Compartilhar" (botão no canto superior direito)
+            3. Cole o email acima
+            4. Dê permissão de **Editor**
+            5. Clique em "Concluído"
+            6. Recarregue esta página
+            """)
+    
+    # Formulário para testar manualmente
+    with st.expander("🔧 Testar conexão manualmente", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**🌐 Teste de Conectividade**")
+            st.caption("Teste se consegue acessar os servidores do Google")
+            
+            if st.button("🔍 Testar Conectividade com Google"):
+                import socket
+                import urllib.request
+                
+                test_results = []
+                
+                # Teste 1: Resolução DNS
+                try:
+                    socket.gethostbyname("sheets.googleapis.com")
+                    test_results.append(("✅ DNS", "Conseguiu resolver sheets.googleapis.com"))
+                except socket.gaierror:
+                    test_results.append(("❌ DNS", "NÃO conseguiu resolver sheets.googleapis.com"))
+                
+                # Teste 2: Conexão HTTP
+                try:
+                    response = urllib.request.urlopen("https://sheets.googleapis.com", timeout=5)
+                    test_results.append(("✅ HTTP", f"Conseguiu conectar (Status: {response.getcode()})"))
+                except Exception as e:
+                    test_results.append(("❌ HTTP", f"NÃO conseguiu conectar: {str(e)[:100]}"))
+                
+                # Teste 3: Google.com geral
+                try:
+                    socket.gethostbyname("google.com")
+                    test_results.append(("✅ Internet", "Tem conexão com a internet"))
+                except socket.gaierror:
+                    test_results.append(("❌ Internet", "NÃO tem conexão com a internet"))
+                
+                # Mostrar resultados
+                for status, msg in test_results:
+                    st.write(f"{status} {msg}")
+                
+                if all("✅" in r[0] for r in test_results):
+                    st.success("🎉 Todos os testes passaram! A conexão deve funcionar.")
+                else:
+                    st.error("⚠️ Alguns testes falharam. Verifique sua conexão de rede.")
+            
+            st.markdown("---")
+            st.write("**🔍 Testar extração de ID**")
+            manual_url = st.text_input("Cole o link completo da sua planilha:", key="manual_url")
+            
+            if st.button("🔍 Testar extração de ID"):
+                if manual_url:
+                    test_id = extrair_id_do_link(manual_url)
+                    if test_id:
+                        st.success(f"✅ ID extraído: `{test_id}`")
+                    else:
+                        st.error("❌ Não consegui extrair o ID. Verifique o formato do link.")
+                        st.code(manual_url)
+                else:
+                    st.warning("⚠️ Cole um link primeiro")
+        
+        with col2:
+            st.write("**🔄 Limpar Cache**")
+            st.caption("Se você alterou o secrets.toml, limpe o cache:")
+            if st.button("🗑️ Limpar Cache e Recarregar"):
+                st.cache_resource.clear()
+                st.cache_data.clear()
+                st.rerun()
+            
+            st.markdown("---")
+            st.write("**💡 Soluções Rápidas**")
+            st.caption("Tente estas soluções na ordem:")
+            
+            solucoes = [
+                "1. Verifique se está conectado à internet",
+                "2. Tente usar outra rede (hotspot do celular)",
+                "3. Desative temporariamente o firewall do Windows",
+                "4. Verifique se há proxy configurado",
+                "5. Reinicie o roteador/modem",
+                "6. Tente novamente em alguns minutos"
+            ]
+            
+            for sol in solucoes:
+                st.write(f"• {sol}")
+    
+    # Instruções finais
+    st.markdown("---")
+    st.info("""
+    **📋 Checklist de Troubleshooting:**
+    
+    1. ✅ Verifique se todas as credenciais estão preenchidas no `secrets.toml`
+    2. ✅ Confirme que o link da planilha está correto e completo
+    3. ✅ **IMPORTANTE:** Compartilhe a planilha com o email da Service Account
+    4. ✅ Dê permissão de **Editor** (não apenas Visualizador)
+    5. ✅ Limpe o cache usando o botão acima
+    6. ✅ Recarregue a página completamente (Ctrl+F5)
+    
+    **Se ainda não funcionar**, verifique os logs de erro acima para mais detalhes.
+    """)
+    
+    st.stop()
+
+# ==========================================
+# 6. UTILITÁRIOS
+# ==========================================
+# Funções utilitárias foram movidas para utils.py
+# Importadas no início do arquivo
+
+# ==========================================
+# 7. FUNÇÕES DE LEITURA/ESCRITA
+# ==========================================
+def ler_aba_gsheets(aba_nome: str, colunas_esperadas: List[str]) -> Tuple[pd.DataFrame, bool]:
+    """
+    Lê uma aba do Google Sheets e retorna um DataFrame padronizado.
+    Implementa rate limiting e retry com backoff exponencial para evitar quota exceeded.
+    
+    Args:
+        aba_nome: Nome da aba a ser lida
+        colunas_esperadas: Lista de colunas esperadas no DataFrame
+        
+    Returns:
+        tuple: (DataFrame, sucesso) onde sucesso é True se a leitura foi bem-sucedida
+    """
+    max_retries = 5
+    base_delay = 2  # Segundos base para backoff exponencial
+    
+    for tentativa in range(max_retries):
+        try:
+            if gs_client is None or not PLANILHA_ID:
+                st.warning(f"⚠️ Conexão não disponível para ler aba '{aba_nome}'")
+                return pd.DataFrame(columns=colunas_esperadas), False
+
+            # Rate limiting: delay entre requisições
+            if tentativa > 0:
+                delay = base_delay * (2 ** tentativa)  # Backoff exponencial: 2s, 4s, 8s, 16s, 32s
+                time.sleep(delay)
+
+            # Abrir planilha
+            spreadsheet = gs_client.open_by_key(PLANILHA_ID)
+            worksheet = spreadsheet.worksheet(aba_nome)
+
+            # Obter todos os dados
+            data = worksheet.get_all_records()
+            df = pd.DataFrame(data)
+            
+            if df.empty:
+                return pd.DataFrame(columns=colunas_esperadas), True
+                
+            # Padronizar nomes das colunas
+            df.columns = [padronizar(c) for c in df.columns]
+            
+            # Garantir que temos todas as colunas esperadas
+            for col in colunas_esperadas:
+                col_norm = padronizar(col)
+                if col_norm not in df.columns:
+                    df[col_norm] = ""
+            
+            # Renomear para os nomes padrão
+            rename_dict = {}
+            for col in colunas_esperadas:
+                col_norm = padronizar(col)
+                if col_norm in df.columns:
+                    rename_dict[col_norm] = col
+            
+            if rename_dict:
+                df = df.rename(columns=rename_dict)
+            
+            # Manter apenas as colunas esperadas (na ordem correta)
+            df = df[colunas_esperadas].copy()
+            
+            # Limpar e converter dados
+            df = df.fillna("")
+            for c in df.columns:
+                if c in ["QTD_AULAS", "CARGA_HORÁRIA", "QTD_PL"]:
+                    df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
+                else:
+                    df[c] = df[c].astype(str).apply(padronizar)
+                    
+            return df, True
+            
+        except gspread.exceptions.APIError as e:
+            # Verificar se é erro de quota exceeded
+            error_str = str(e).lower()
+            is_quota_error = '429' in error_str or 'quota exceeded' in error_str or 'rate limit' in error_str
+
+            if is_quota_error:
+                if tentativa < max_retries - 1:
+                    delay = base_delay * (2 ** tentativa)
+                    if tentativa == 0:  # Primeira tentativa, avisar usuário
+                        st.warning(f"⏳ Quota da API excedida ao ler '{aba_nome}'. Aguardando {delay}s antes de tentar novamente...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    st.error(f"❌ Erro ao ler aba '{aba_nome}': Quota da API excedida após {max_retries} tentativas.")
+                    st.info("💡 **Soluções:**\n"
+                            "1. Aguarde alguns minutos antes de tentar novamente\n"
+                            "2. O cache está configurado para 5 minutos - aguarde o próximo carregamento automático\n"
+                            "3. Evite recarregar a página frequentemente\n"
+                            "4. Use o botão 'Limpar Cache' apenas quando necessário")
+                    return pd.DataFrame(columns=colunas_esperadas), False
+            else:
+                # Outro erro da API
+                st.error(f"❌ Erro ao ler aba '{aba_nome}': {e}")
+                return pd.DataFrame(columns=colunas_esperadas), False
+                
+        except gspread.exceptions.WorksheetNotFound:
+            st.warning(f"⚠️ Aba '{aba_nome}' não encontrada na planilha")
+            return pd.DataFrame(columns=colunas_esperadas), False
+            
+        except Exception as e:
+            if tentativa < max_retries - 1:
+                delay = base_delay * (2 ** tentativa)
+                time.sleep(delay)
+                continue
+            else:
+                st.error(f"❌ Erro ao ler aba '{aba_nome}': {e}")
+                return pd.DataFrame(columns=colunas_esperadas), False
+    
+    # Se chegou aqui, todas as tentativas falharam
+    return pd.DataFrame(columns=colunas_esperadas), False
+
+def escrever_aba_gsheets(aba_nome: str, df: pd.DataFrame) -> bool:
+    """
+    Escreve dados em uma aba do Google Sheets.
+    Implementa rate limiting e retry com backoff exponencial para evitar quota exceeded.
+    
+    Args:
+        aba_nome: Nome da aba onde escrever
+        df: DataFrame com os dados a serem escritos
+        
+    Returns:
+        bool: True se a escrita foi bem-sucedida, False caso contrário
+    """
+    max_retries = 5
+    base_delay = 2  # Segundos base para backoff exponencial
+    
+    for tentativa in range(max_retries):
+        try:
+            if gs_client is None or not PLANILHA_ID:
+                st.error(f"❌ Conexão não disponível para escrever na aba '{aba_nome}'")
+                return False
+            
+            if df.empty:
+                st.warning(f"⚠️ DataFrame vazio para aba '{aba_nome}'")
+                return False
+            
+            # Rate limiting: delay entre requisições
+            if tentativa > 0:
+                delay = base_delay * (2 ** tentativa)  # Backoff exponencial
+                time.sleep(delay)
+            
+            spreadsheet = gs_client.open_by_key(PLANILHA_ID)
+            
+            # Verificar se a aba existe
+            try:
+                worksheet = spreadsheet.worksheet(aba_nome)
+            except gspread.exceptions.WorksheetNotFound:
+                # Criar nova aba se não existir
+                worksheet = spreadsheet.add_worksheet(
+                    title=aba_nome,
+                    rows=max(1000, len(df) + 100),
+                    cols=len(df.columns)
+                )
+            
+            # Limpar worksheet
+            worksheet.clear()
+            
+            # Preparar dados (cabeçalho + valores)
+            values = [df.columns.tolist()] + df.fillna("").values.tolist()
+            
+            # Atualizar worksheet
+            worksheet.update(values, 'A1')
+            
+            return True
+            
+        except gspread.exceptions.APIError as e:
+            # Verificar se é erro de quota exceeded
+            error_str = str(e).lower()
+            is_quota_error = '429' in error_str or 'quota exceeded' in error_str or 'rate limit' in error_str
+
+            if is_quota_error:
+                if tentativa < max_retries - 1:
+                    delay = base_delay * (2 ** tentativa)
+                    if tentativa == 0:
+                        st.warning(f"⏳ Quota da API excedida ao salvar '{aba_nome}'. Aguardando {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    st.error(f"❌ Erro ao salvar aba '{aba_nome}': Quota da API excedida após {max_retries} tentativas.")
+                    st.info("💡 Aguarde alguns minutos antes de tentar salvar novamente.")
+                    return False
+            else:
+                st.error(f"❌ Erro ao salvar aba '{aba_nome}': {e}")
+                return False
+                
+        except Exception as e:
+            if tentativa < max_retries - 1:
+                delay = base_delay * (2 ** tentativa)
+                time.sleep(delay)
+                continue
+            else:
+                st.error(f"❌ Erro ao salvar aba '{aba_nome}': {e}")
+                return False
+    
+    return False
+
+# ==========================================
+# 8. LEITURA DE DADOS (CACHE)
+# ==========================================
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False, max_entries=1)
 def carregar_banco():
+    """
+    Carrega todos os dados do Google Sheets.
+    
+    Returns:
+        tuple: (turmas, curriculo, professores, config_dias, agrupamentos, horario, sucesso)
+    """
     with st.spinner("🔄 Carregando sistema..."):
-        t, ok_t = ler_aba_segura("Turmas", COLS_PADRAO["Turmas"])
-        c, ok_c = ler_aba_segura("Curriculo", COLS_PADRAO["Curriculo"])
-        p, ok_p = ler_aba_segura("Professores", COLS_PADRAO["Professores"])
-        d, ok_d = ler_aba_segura("ConfigDias", COLS_PADRAO["ConfigDias"])
-        r, ok_r = ler_aba_segura("Agrupamentos", COLS_PADRAO["Agrupamentos"])
-        h, ok_h = ler_aba_segura("Horario", COLS_PADRAO["Horario"])
-    return t, c, p, d, r, h, (ok_t and ok_c and ok_p and ok_d and ok_r)
+        if gs_client is None or not PLANILHA_ID:
+            # Retornar DataFrames vazios se não houver conexão
+            empty_dfs = [pd.DataFrame() for _ in range(6)]
+            return (*empty_dfs, False)
+            
+        try:
+            # Ler cada aba
+            t, ok_t = ler_aba_gsheets("Turmas", COLS_PADRAO["Turmas"])
+            c, ok_c = ler_aba_gsheets("Curriculo", COLS_PADRAO["Curriculo"])
+            
+            # Ler professores de ambas as abas (EF e DT) e combinar
+            p_ef, ok_ef = ler_aba_gsheets("ProfessoresEF", COLS_PADRAO["Professores"])
+            p_dt, ok_dt = ler_aba_gsheets("ProfessoresDT", COLS_PADRAO["Professores"])
+            
+            # Combinar professores em um único DataFrame
+            if ok_ef and ok_dt:
+                p = pd.concat([p_ef, p_dt], ignore_index=True)
+                ok_p = True
+            elif ok_ef:
+                p = p_ef
+                ok_p = True
+            elif ok_dt:
+                p = p_dt
+                ok_p = True
+            else:
+                # Tentar ler aba única "Professores" (compatibilidade com versão antiga)
+                p, ok_p = ler_aba_gsheets("Professores", COLS_PADRAO["Professores"])
+            
+            d, ok_d = ler_aba_gsheets("ConfigDias", COLS_PADRAO["ConfigDias"])
+            r, ok_r = ler_aba_gsheets("Agrupamentos", COLS_PADRAO["Agrupamentos"])
+            
+            # Horario é opcional (pode não existir ainda)
+            h, ok_h = ler_aba_gsheets("Horario", COLS_PADRAO["Horario"])
+            if not ok_h:
+                h = pd.DataFrame()
+                
+            sucesso = ok_t and ok_c and ok_p and ok_d and ok_r
+            return t, c, p, d, r, h, sucesso
+            
+        except Exception as e:
+            # Limpar cache em caso de erro para forçar recarregamento na próxima tentativa
+            st.cache_data.clear()
 
-dt, dc, dp, dd, da, dh, sistema_seguro = carregar_banco()
+            error_msg = str(e)
+            st.error(f"❌ Erro ao carregar dados: {error_msg}")
 
+            # Se for erro de quota, dar orientações específicas
+            if '429' in error_msg or 'quota exceeded' in error_msg or 'rate limit' in error_msg:
+                st.info("💡 **Quota da API excedida!**\n\n"
+                       "• Aguarde alguns minutos antes de tentar novamente\n"
+                       "• O cache foi limpo automaticamente\n"
+                       "• Evite recarregar a página frequentemente\n"
+                       "• Use o botão 'Limpar Cache' apenas quando necessário")
+            else:
+                st.info("💡 **Dicas para resolver:**\n\n"
+                       "• Verifique sua conexão com a internet\n"
+                       "• Confirme se o link da planilha está correto\n"
+                       "• Certifique-se de que o email da Service Account tem acesso à planilha\n"
+                       "• O cache foi limpo automaticamente para tentar novamente")
+
+            empty_dfs = [pd.DataFrame() for _ in range(6)]
+            return (*empty_dfs, False)
+
+# Carregar dados com tratamento de erro robusto
+try:
+    dt, dc, dp, dd, da, dh, sistema_seguro = carregar_banco()
+except Exception as e:
+    st.error(f"❌ Erro crítico ao inicializar sistema: {str(e)}")
+    st.info("💡 **Tente:**\n"
+           "1. Clique no botão '🚨 Reset Sistema' acima\n"
+           "2. Recarregue a página completamente (Ctrl+F5)\n"
+           "3. Verifique sua conexão com a internet\n"
+           "4. Confirme se as credenciais estão corretas no secrets.toml")
+    # Forçar parada se houver erro crítico
+    st.stop()
+
+# ==========================================
+# 9. FUNÇÕES DE SALVAR
+# ==========================================
 def salvar_seguro(dt, dc, dp, dd, da, dh=None):
+    """Salva todos os dados no Google Sheets com rate limiting"""
     try:
         with st.status("💾 Salvando...", expanded=True) as status:
-            conn.update(worksheet="Turmas", data=dt.fillna(""))
-            conn.update(worksheet="Curriculo", data=dc.fillna(""))
-            conn.update(worksheet="Professores", data=dp.fillna(""))
-            conn.update(worksheet="ConfigDias", data=dd.fillna(""))
-            conn.update(worksheet="Agrupamentos", data=da.fillna(""))
-            if dh is not None: conn.update(worksheet="Horario", data=dh.fillna(""))
+            # Escrever cada aba com delay entre requisições para evitar quota exceeded
+            status.write("📝 Salvando Turmas...")
+            if not escrever_aba_gsheets("Turmas", dt.fillna("")):
+                return
+            time.sleep(0.5)  # Delay entre requisições
+            
+            status.write("📝 Salvando Currículo...")
+            if not escrever_aba_gsheets("Curriculo", dc.fillna("")):
+                return
+            time.sleep(0.5)
+            
+            # Separar professores por vínculo e salvar nas abas corretas
+            if not dp.empty:
+                # Garantir que a coluna VÍNCULO existe e está padronizada
+                if 'VÍNCULO' in dp.columns:
+                    dp['VÍNCULO'] = dp['VÍNCULO'].astype(str).apply(padronizar)
+                    # Separar por vínculo
+                    dp_ef = dp[dp['VÍNCULO'].str.contains('EFETIVO', case=False, na=False)].copy()
+                    dp_dt = dp[~dp['VÍNCULO'].str.contains('EFETIVO', case=False, na=False)].copy()
+                    
+                    # Salvar nas abas separadas
+                    status.write("📝 Salvando ProfessoresEF...")
+                    if not escrever_aba_gsheets("ProfessoresEF", dp_ef.fillna("")):
+                        return
+                    time.sleep(0.5)
+                    
+                    status.write("📝 Salvando ProfessoresDT...")
+                    if not escrever_aba_gsheets("ProfessoresDT", dp_dt.fillna("")):
+                        return
+                    time.sleep(0.5)
+                else:
+                    # Se não tiver coluna VÍNCULO, salvar tudo em ProfessoresDT (compatibilidade)
+                    status.write("📝 Salvando ProfessoresDT...")
+                    if not escrever_aba_gsheets("ProfessoresDT", dp.fillna("")):
+                        return
+                    time.sleep(0.5)
+            else:
+                # Se estiver vazio, criar abas vazias
+                status.write("📝 Criando abas vazias de professores...")
+                escrever_aba_gsheets("ProfessoresEF", pd.DataFrame(columns=COLS_PADRAO["Professores"]).fillna(""))
+                time.sleep(0.5)
+                escrever_aba_gsheets("ProfessoresDT", pd.DataFrame(columns=COLS_PADRAO["Professores"]).fillna(""))
+                time.sleep(0.5)
+            
+            status.write("📝 Salvando ConfigDias...")
+            if not escrever_aba_gsheets("ConfigDias", dd.fillna("")):
+                return
+            time.sleep(0.5)
+            
+            status.write("📝 Salvando Agrupamentos...")
+            if not escrever_aba_gsheets("Agrupamentos", da.fillna("")):
+                return
+            time.sleep(0.5)
+            
+            if dh is not None:
+                status.write("📝 Salvando Horário...")
+                if not escrever_aba_gsheets("Horario", dh.fillna("")):
+                    return
+                time.sleep(0.5)
+            
+            # Limpar cache
             st.cache_data.clear()
             status.update(label="✅ Salvo!", state="complete", expanded=False)
+            
         time.sleep(1)
         st.rerun()
-    except Exception as e: st.error(f"Erro ao salvar: {e}")
+    except Exception as e: 
+        st.error(f"Erro ao salvar: {e}")
+        if '429' in str(e) or 'Quota exceeded' in str(e):
+            st.info("💡 **Quota da API excedida.** Aguarde alguns minutos antes de tentar salvar novamente.")
+        
+    except Exception as e:
+        st.error(f"Erro ao salvar: {e}")
 
 def botao_salvar(label, key):
-    if sistema_seguro:
+    """Botão de salvar com verificação"""
+    if sistema_seguro and PLANILHA_ID:
         if st.button(label, key=key, type="primary", use_container_width=True):
             salvar_seguro(dt, dc, dp, dd, da)
-    else: st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
+    else:
+        st.button(f"🔒 {label}", key=key, disabled=True, use_container_width=True)
 
 # ==========================================
-# 5. CÉREBRO: RH ROBIN HOOD CORRIGIDO
+# 10. CÉREBRO: RH ROBIN HOOD CORRIGIDO
 # ==========================================
-def gerar_professores_v52(dt, dc, dp_existente, carga_minima=14, carga_maxima=30, media_alvo=20):
+def gerar_professores_v52(
+    dt: pd.DataFrame,
+    dc: pd.DataFrame,
+    dp_existente: pd.DataFrame,
+    carga_minima: int = CARGA_MINIMA_PADRAO,
+    carga_maxima: int = CARGA_MAXIMA_PADRAO,
+    media_alvo: int = MEDIA_ALVO_PADRAO
+) -> Tuple[pd.DataFrame, List]:
     """Versão corrigida: calcula demanda corretamente"""
     
     # 1. Calcular demanda TOTAL por região e matéria
@@ -202,11 +916,13 @@ def gerar_professores_v52(dt, dc, dp_existente, carga_minima=14, carga_maxima=30
                 'escolas': [padronizar(x) for x in str(p['ESCOLAS_ALOCADAS']).split(',') if padronizar(x)]
             })
     
-    # 3. Reduzir demanda com professores existentes
+    # 3. Reduzir demanda com professores existentes (considerando compatibilidade Fundão/Timbuí)
     demanda_restante = {}
     
     for (reg, mat), total in demanda_total.items():
         demanda_restante[(reg, mat)] = total
+        
+        # Verificar professores da mesma região/matéria
         if (reg, mat) in professores_por_regiao_materia:
             for prof in professores_por_regiao_materia[(reg, mat)]:
                 carga_disponivel = min(prof['carga'], carga_maxima)
@@ -214,12 +930,58 @@ def gerar_professores_v52(dt, dc, dp_existente, carga_minima=14, carga_maxima=30
                     if demanda_restante[(reg, mat)] > 0:
                         usado = min(demanda_restante[(reg, mat)], carga_disponivel)
                         demanda_restante[(reg, mat)] -= usado
+        
+        # REGRA ESPECIAL: Professores de Fundão podem cobrir demanda de Timbuí e vice-versa
+        if reg == "FUNDÃO":
+            reg_compativel = "TIMBUÍ"
+            if (reg_compativel, mat) in professores_por_regiao_materia:
+                for prof in professores_por_regiao_materia[(reg_compativel, mat)]:
+                    carga_disponivel = min(prof['carga'], carga_maxima)
+                    if carga_disponivel > 0:
+                        if demanda_restante[(reg, mat)] > 0:
+                            usado = min(demanda_restante[(reg, mat)], carga_disponivel)
+                            demanda_restante[(reg, mat)] -= usado
+        elif reg == "TIMBUÍ":
+            reg_compativel = "FUNDÃO"
+            if (reg_compativel, mat) in professores_por_regiao_materia:
+                for prof in professores_por_regiao_materia[(reg_compativel, mat)]:
+                    carga_disponivel = min(prof['carga'], carga_maxima)
+                    if carga_disponivel > 0:
+                        if demanda_restante[(reg, mat)] > 0:
+                            usado = min(demanda_restante[(reg, mat)], carga_disponivel)
+                            demanda_restante[(reg, mat)] -= usado
     
-    # 4. Calcular necessidade real
+    # 4. Agrupar necessidade de Fundão e Timbuí para criar vagas compartilhadas
     necessidade = {}
+    necessidade_fundao_timbui = {}  # Agrupar por matéria
+    
     for chave, restante in demanda_restante.items():
+        reg, mat = chave
         if restante > 0:
-            necessidade[chave] = restante
+            if reg in ["FUNDÃO", "TIMBUÍ"]:
+                if mat not in necessidade_fundao_timbui:
+                    necessidade_fundao_timbui[mat] = {"FUNDÃO": 0, "TIMBUÍ": 0}
+                necessidade_fundao_timbui[mat][reg] = restante
+            else:
+                necessidade[chave] = restante
+    
+    # Criar vagas compartilhadas para Fundão/Timbuí quando há demanda em ambas ou quando faz sentido
+    for mat, deficits in necessidade_fundao_timbui.items():
+        demanda_fundao = deficits["FUNDÃO"]
+        demanda_timbui = deficits["TIMBUÍ"]
+        
+        # Se há demanda em ambas ou demanda significativa em uma, criar vaga compartilhada
+        if demanda_fundao > 0 or demanda_timbui > 0:
+            demanda_total_compartilhada = demanda_fundao + demanda_timbui
+            # Criar vaga compartilhada se a demanda total justificar
+            if demanda_total_compartilhada >= carga_minima:
+                necessidade[("FUNDÃO", mat)] = demanda_total_compartilhada  # Usar Fundão como região principal
+            else:
+                # Se demanda pequena, criar vagas separadas
+                if demanda_fundao > 0:
+                    necessidade[("FUNDÃO", mat)] = demanda_fundao
+                if demanda_timbui > 0:
+                    necessidade[("TIMBUÍ", mat)] = demanda_timbui
     
     # 5. Criar novos professores apenas para necessidade real
     novos_profs = []
@@ -228,31 +990,20 @@ def gerar_professores_v52(dt, dc, dp_existente, carga_minima=14, carga_maxima=30
         if deficit <= 0:
             continue
         
-        # Calcula quantos professores precisamos
-        qtd_profs = max(1, math.ceil(deficit / media_alvo))
+        # REGRA 7: Distribuir carga de forma inteligente
+        cargas = distribuir_carga_inteligente(deficit)
         
-        # Ajusta para ficar dentro dos limites
-        carga_por_prof = deficit / qtd_profs
+        # Validar cargas
+        cargas_validas = []
+        for carga in cargas:
+            valido, msg = verificar_limites_carga(carga, deficit)
+            if valido:
+                cargas_validas.append(carga)
         
-        while qtd_profs > 1 and carga_por_prof < carga_minima:
-            qtd_profs -= 1
-            carga_por_prof = deficit / qtd_profs
+        if not cargas_validas:
+            cargas_validas = [min(deficit, REGRA_CARGA_HORARIA["maximo_aulas"])]
         
-        while carga_por_prof > carga_maxima:
-            qtd_profs += 1
-            carga_por_prof = deficit / qtd_profs
-        
-        # Distribui a carga
-        cargas = []
-        restante = deficit
-        
-        for i in range(qtd_profs):
-            if i == qtd_profs - 1:
-                carga = restante
-            else:
-                carga = min(carga_maxima, max(carga_minima, round(carga_por_prof)))
-                restante -= carga
-            cargas.append(carga)
+        cargas = cargas_validas
         
         # Cria os professores
         for i, carga in enumerate(cargas):
@@ -264,25 +1015,43 @@ def gerar_professores_v52(dt, dc, dp_existente, carga_minima=14, carga_maxima=30
                 # Gera código
                 cod = gerar_codigo_padrao(contadores[chave_cont], "DT", reg, mat)
                 
-                # Obtém escolas da região
-                escolas_regiao = list(set(dt[dt['REGIÃO'] == reg]['ESCOLA'].unique()))
+                # REGRA ESPECIAL: Se for Fundão e há demanda de Timbuí também, criar vaga compartilhada
+                escolas_regiao = []
+                nome_vaga = f"VAGA {mat} {reg}"
+                
+                if reg == "FUNDÃO" and mat in necessidade_fundao_timbui:
+                    # Verificar se há demanda de Timbuí também
+                    demanda_timbui = necessidade_fundao_timbui[mat].get("TIMBUÍ", 0)
+                    if demanda_timbui > 0:
+                        # Criar vaga compartilhada
+                        escolas_fundao = list(set(dt[dt['REGIÃO'] == "FUNDÃO"]['ESCOLA'].unique())) if not dt.empty else []
+                        escolas_timbui = list(set(dt[dt['REGIÃO'] == "TIMBUÍ"]['ESCOLA'].unique())) if not dt.empty else []
+                        escolas_regiao = escolas_fundao[:2] + escolas_timbui[:2]
+                        nome_vaga = f"VAGA {mat} FUNDÃO/TIMBUÍ"
+                    else:
+                        escolas_regiao = list(set(dt[dt['REGIÃO'] == reg]['ESCOLA'].unique())) if not dt.empty else []
+                else:
+                    escolas_regiao = list(set(dt[dt['REGIÃO'] == reg]['ESCOLA'].unique())) if not dt.empty else []
+                
+                # REGRA 5: Calcular PL baseado na LDB (1/3)
+                pl_ldb = calcular_pl_ldb(round(carga))
                 
                 novos_profs.append({
                     "CÓDIGO": cod,
-                    "NOME": f"VAGA {mat} {reg}",
+                    "NOME": nome_vaga,
                     "COMPONENTES": mat,
                     "CARGA_HORÁRIA": round(carga),
                     "REGIÃO": reg,
                     "VÍNCULO": "DT",
                     "TURNO_FIXO": "",
-                    "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]),  # Atribui até 2 escolas
-                    "QTD_PL": 0
+                    "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:4]) if escolas_regiao else "",  # Até 4 escolas se compartilhada
+                    "QTD_PL": pl_ldb  # PL calculado pela LDB
                 })
     
     return pd.DataFrame(novos_profs), []
 
 # ==========================================
-# 6. CÉREBRO: GERAÇÃO E ALOCAÇÃO INTELIGENTE
+# 11. CÉREBRO: GERAÇÃO E ALOCAÇÃO INTELIGENTE
 # ==========================================
 def carregar_objs(df):
     professores = {}
@@ -305,12 +1074,17 @@ def carregar_rotas(df):
         for e in escs: m[e] = set(escs)
     return m
 
-def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, mapa_escola_regiao, max_tentativas=50):
+def resolver_grade_inteligente(
+    turmas: List,
+    curriculo: pd.DataFrame,
+    profs: List,
+    rotas: Dict,
+    turno_atual: str,
+    mapa_escola_regiao: Dict,
+    max_tentativas: int = MAX_TENTATIVAS_ALOCACAO
+) -> Tuple[bool, Dict, str, List]:
     """Versão corrigida: não cria professores em excesso"""
     turno_atual = padronizar(turno_atual)
-    
-    # NÃO FAZER RESET AQUI (CORREÇÃO 4)
-    # O reset deve ser feito apenas uma vez antes do loop principal de geração.
     
     # Preparar demandas REAIS
     demandas = []
@@ -322,10 +1096,10 @@ def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, map
             if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
                 aulas.extend([mat] * int(r['QTD_AULAS']))
         
-        while len(aulas) < 5:
+        while len(aulas) < SLOTS_AULA:
             aulas.append("---")
         
-        for slot, mat in enumerate(aulas[:5]):
+        for slot, mat in enumerate(aulas[:SLOTS_AULA]):
             if mat != "---":
                 demandas.append({
                     'turma': turma,
@@ -334,12 +1108,14 @@ def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, map
                     'prioridade': 1
                 })
     
-    # LIMITE de novos professores para evitar criação excessiva (CORREÇÃO 2: AUMENTADO)
-    LIMITE_NOVOS_PROFESSORES = 50 
-    novos_professores_criados = 0
+    # Se não há demandas, retornar grade vazia
+    if not demandas:
+        grade_vazia = {t['nome_turma']: ["---"] * SLOTS_AULA for t in turmas}
+        return True, grade_vazia, "Nenhuma demanda de especialistas", profs
     
+    # NÃO criar professores durante alocação - será consolidado depois
     for tentativa in range(max_tentativas):
-        grade = {t['nome_turma']: [None]*5 for t in turmas}
+        grade = {t['nome_turma']: [None] * SLOTS_AULA for t in turmas}
         profs_temp = copy.deepcopy(profs)
         random.shuffle(demandas)
         
@@ -353,43 +1129,88 @@ def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, map
             candidatos = []
             
             for p in profs_temp:
+                # REGRA: Verificar se o professor leciona a matéria
                 if mat not in p['mats']:
                     continue
                 
+                # REGRA: Verificar turno fixo (se aplicável)
                 if p['tf'] and p['tf'] not in ["AMBOS", "", turno_atual]:
                     continue
                 
-                if reg != p['reg']:
+                # REGRA: Verificar compatibilidade de região (com matéria para regras especiais)
+                pode_dar_aula, prioridade_regiao = verificar_compatibilidade_regiao(p['reg'], reg, mat)
+                if not pode_dar_aula:
+                    continue  # Região incompatível
+                
+                # REGRA: Verificar limite de carga horária
+                if p['atrib'] >= min(p['max'], REGRA_CARGA_HORARIA["maximo_aulas"]):
                     continue
                 
-                if p['atrib'] >= min(p['max'], 30):
-                    continue
-                
-                # Verifica conflitos
-                conflito = False
+                # REGRA 1: Verificar conflito de horário (mesmo slot = impossível)
                 if slot in p['ocup']:
-                    conflito = True
-                else:
-                    for s_occ, e_occ in p['ocup'].items():
-                        if e_occ != esc:
+                    continue  # Professor já está ocupado neste horário
+                
+                # REGRA 4: Verificar janelas/buracos entre aulas (apenas na mesma escola)
+                # Janelas são permitidas entre escolas diferentes (professor pode se deslocar)
+                tem_janela = False
+                if p['ocup']:  # Só verifica se já tem aulas alocadas
+                    # Verificar se há aulas na mesma escola
+                    tem_aula_mesma_escola = any(e_occ == esc for e_occ in p['ocup'].values())
+                    
+                    if tem_aula_mesma_escola:
+                        # Só verifica janela se há aulas na mesma escola
+                        tem_janela = verificar_janelas(p['ocup'], slot, esc, rotas)
+                        if tem_janela:
+                            continue  # Criaria janela/buraco na mesma escola
+                
+                # Verificar conflitos de deslocamento (escolas diferentes, sem rota)
+                # Tornar mais flexível: permitir deslocamento se houver tempo suficiente
+                conflito_deslocamento = False
+                for s_occ, e_occ in p['ocup'].items():
+                    if e_occ != esc:
+                        # Verificar se estão na mesma rota
+                        mesma_rota = esc in rotas.get(e_occ, set()) or e_occ in rotas.get(esc, set())
+                        if not mesma_rota:
+                            # Escolas diferentes sem rota: verificar se slots são muito próximos
                             dist = abs(s_occ - slot)
-                            mesma_rota = esc in rotas.get(e_occ, set())
-                            if (not mesma_rota and dist < 2) or (mesma_rota and dist < 1):
-                                conflito = True
+                            # Permitir deslocamento se houver pelo menos 1 slot de diferença (dist >= 1)
+                            # Isso permite: 1ª aula escola A, 3ª aula escola B (tempo para deslocar)
+                            if dist < 1:  # Apenas bloquear se for exatamente o mesmo slot
+                                conflito_deslocamento = True
                                 break
                 
-                if conflito:
+                if conflito_deslocamento:
                     continue
                 
-                # Score
+                # Score de prioridade (quanto maior, melhor)
                 score = 0
+                
+                # Máxima prioridade: Professor efetivo na escola base
                 if p['vin'] == "EFETIVO" and esc in p['escolas_base']:
-                    score += 10000
+                    score += 100000
+                
+                # Alta prioridade: Mesma região ou compatibilidade Fundão ↔ Timbuí
+                # REGRA GERAL: Fundão e Timbuí são compatíveis para TODAS as matérias
+                if ((p['reg'] == "FUNDÃO" and reg == "TIMBUÍ") or \
+                    (p['reg'] == "TIMBUÍ" and reg == "FUNDÃO")):
+                    score += prioridade_regiao * 1500  # Bonus para facilitar alocação entre Fundão e Timbuí
+                else:
+                    score += prioridade_regiao * 1000
+                
+                # Prioridade: Escola base do professor
                 if esc in p['escolas_base']:
                     score += 2000
+                
+                # Prioridade: Escola já visitada pelo professor
                 if esc in p['escolas_reais']:
                     score += 1000
-                score += (30 - p['atrib']) * 10
+                
+                # Prioridade: Carga disponível (preferir professores com mais espaço)
+                score += (REGRA_CARGA_HORARIA["maximo_aulas"] - p['atrib']) * 10
+                
+                # Prioridade: Aulas consecutivas na mesma escola
+                if esc in [e for s, e in p['ocup'].items()]:
+                    score += 500
                 
                 candidatos.append((score, p))
             
@@ -402,40 +1223,17 @@ def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, map
                 escolhido['atrib'] += 1
                 escolhido['escolas_reais'].add(esc)
             else:
-                # Tenta criar novo professor APENAS se estiver dentro do limite
-                if novos_professores_criados < LIMITE_NOVOS_PROFESSORES:
-                    # Encontra próximo número disponível
-                    numeros_existentes = []
-                    for p in profs_temp:
-                        match = re.search(r'P(\d+)', p['id'])
-                        if match:
-                            numeros_existentes.append(int(match.group(1)))
-                    novo_num = max(numeros_existentes) + 1 if numeros_existentes else 1
-                    
-                    novo_id = gerar_codigo_padrao(novo_num, "DT", reg, mat)
-                    
-                    novo_prof = {
-                        'id': novo_id,
-                        'nome': f"NOVO {mat} {reg}",
-                        'mats': {mat},
-                        'reg': reg,
-                        'vin': 'DT',
-                        'tf': '',
-                        'escolas_base': {esc},
-                        'max': 30,
-                        'atrib': 1,
-                        'ocup': {slot: esc},
-                        'escolas_reais': {esc},
-                        'regs_alocadas_historico': {reg}
-                    }
-                    
-                    profs_temp.append(novo_prof)
-                    novos_professores_criados += 1
-                    grade[turma['nome_turma']][slot] = novo_id
-                else:
-                    # Se atingiu o limite, marca como falha
-                    sucesso = False
-                    grade[turma['nome_turma']][slot] = "---"
+                # NÃO criar professores durante alocação - será consolidado depois
+                # Marcar como não alocado para consolidação posterior
+                sucesso = False
+                grade[turma['nome_turma']][slot] = "---"
+                
+                # Debug: verificar por que não encontrou candidatos
+                if tentativa == 0:  # Só na primeira tentativa para não poluir logs
+                    profs_disponiveis = [p for p in profs_temp if mat in p['mats']]
+                    if profs_disponiveis:
+                        # Há professores da matéria, mas foram bloqueados pelas regras
+                        pass  # Será tratado na consolidação
         
         # Verifica se todas as aulas foram alocadas
         todas_alocadas = all(all(v is not None for v in linha) for linha in grade.values())
@@ -443,7 +1241,7 @@ def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, map
         if todas_alocadas and sucesso:
             # Preenche qualquer slot None com "---"
             for t_nome, aulas in grade.items():
-                for i in range(5):
+                for i in range(SLOTS_AULA):
                     if aulas[i] is None:
                         grade[t_nome][i] = "---"
             
@@ -456,7 +1254,7 @@ def resolver_grade_inteligente(turmas, curriculo, profs, rotas, turno_atual, map
     
     # Se não conseguiu, retorna o que tem
     for t_nome, aulas in grade.items():
-        for i in range(5):
+        for i in range(SLOTS_AULA):
             if aulas[i] is None:
                 grade[t_nome][i] = "---"
     
@@ -483,20 +1281,48 @@ def desenhar_xls(writer, escola, dados):
         r+=1
 
 # ==========================================
-# 7. UI COM DEPURAÇÃO
+# 12. INTERFACE PRINCIPAL
 # ==========================================
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2997/2997322.png", width=60)
     st.title("Gestor Escolar")
-    if not sistema_seguro: st.error("Erro dados")
-    else: st.success("Online")
-    if st.button("Atualizar"): st.cache_data.clear(); st.rerun()
+    
+    # Status da conexão
+    if gs_client is None:
+        st.error("⚠️ Erro na conexão com Google Sheets")
+    elif not PLANILHA_ID:
+        st.error("⚠️ ID da planilha não encontrado")
+    elif sistema_seguro:
+        st.success("✅ Sistema Carregado")
+        try:
+            spreadsheet = gs_client.open_by_key(PLANILHA_ID)
+            st.caption(f"📋 {spreadsheet.title}")
+        except:
+            pass
+    else:
+        st.warning("⚠️ Dados incompletos")
+    
+    if st.button("🔄 Atualizar Dados", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    
+    st.markdown("---")
+    st.caption(f"Última atualização: {st.session_state['hora_db']}")
 
-t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📊 Dashboard", "⚙️ Config", "📍 Rotas", "🏫 Turmas", "👨‍🏫 Professores", "🚀 Gerador", "📅 Ver Horário"])
+# Verificar conexão antes de mostrar abas
+if gs_client is None or not PLANILHA_ID:
+    st.stop()
 
-# 1. DASHBOARD
+# Criar abas
+t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(["📊 Dashboard", "⚙️ Config", "📍 Rotas", "🏫 Turmas", "👨‍🏫 Professores", "💼 Vagas", "🚀 Gerador", "📅 Ver Horário"])
+
+# ==========================================
+# RESTANTE DO CÓDIGO DAS ABAS (MANTENHA O MESMO)
+# ==========================================
+# ABA 1: DASHBOARD
 with t1:
-    if dt.empty: st.info("Cadastre turmas.")
+    if dt.empty: 
+        st.info("📝 Cadastre turmas na aba '🏫 Turmas'.")
     else:
         # Cálculo REAL da demanda
         total_aulas_especialistas = 0
@@ -556,14 +1382,14 @@ with t1:
             res.append({"Matéria": m, "Falta": int(s), "Novos": round(s/ch_padrao, 1) if s>0 else 0, "Status": "🔴" if s>0 else "🟢"})
         st.dataframe(pd.DataFrame(res), use_container_width=True)
 
-# 2. CONFIG
+# ABA 2: CONFIG (MANTENHA O MESMO CÓDIGO)
 with t2:
     c1, c2 = st.columns(2)
     with c1:
         st.write("📅 Dias"); dd = st.data_editor(dd, num_rows="dynamic", key="edd")
         with st.form("fd"):
             a = st.selectbox("Série", ORDEM_SERIES)
-            d = st.selectbox("Dia", ["SEGUNDA-FEIRA", "TERÇA-FEIRA", "QUARTA-FEIRA", "QUINTA-FEIRA", "SEXTA-FEIRA"])
+            d = st.selectbox("Dia", DIAS_SEMANA)
             if st.form_submit_button("Add"): 
                 dd = pd.concat([dd, pd.DataFrame([{"SÉRIE/ANO": a, "DIA_PLANEJAMENTO": d}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
     with c2:
@@ -576,7 +1402,7 @@ with t2:
                 dc = pd.concat([dc, pd.DataFrame([{"SÉRIE/ANO": a, "COMPONENTE": m, "QTD_AULAS": q}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
     botao_salvar("Salvar Config", "bcfg")
 
-# 3. ROTAS
+# ABA 3: ROTAS (MANTENHA O MESMO CÓDIGO)
 with t3:
     da = st.data_editor(da, num_rows="dynamic", key="edr")
     with st.expander("Nova Rota"):
@@ -587,7 +1413,7 @@ with t3:
                 da = pd.concat([da, pd.DataFrame([{"NOME_ROTA": n, "LISTA_ESCOLAS": ",".join(l)}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
     botao_salvar("Salvar Rotas", "brot")
 
-# 4. TURMAS
+# ABA 4: TURMAS (MANTENHA O MESMO CÓDIGO)
 with t4:
     with st.expander("➕ Nova Turma", expanded=False):
         with st.form("ft"):
@@ -605,7 +1431,7 @@ with t4:
     dt = st.data_editor(dt, num_rows="dynamic", key="edt")
     botao_salvar("Salvar Turmas", "btur")
 
-# 5. PROFS
+# ABA 5: PROFESSORES (MANTENHA O MESMO CÓDIGO)
 with t5:
     # Exibir estatísticas reais
     if not dt.empty and not dc.empty:
@@ -638,9 +1464,9 @@ with t5:
     with st.expander("🤖 Ferramenta: Gerar Vagas Automáticas (Balanceamento)", expanded=False):
         st.info("Distribui a carga de forma equilibrada (Teto 30h, Mínimo 14h, Média Alvo 20h).")
         c_rh1, c_rh2, c_rh3, c_btn = st.columns([1,1,1,1])
-        with c_rh1: carga_min = st.number_input("Carga Mínima", 5, 20, 14)
-        with c_rh2: carga_max = st.number_input("Carga Máxima (Teto)", 20, 50, 30)
-        with c_rh3: media_alvo = st.number_input("Média Alvo", 10, 40, 20)
+        with c_rh1: carga_min = st.number_input("Carga Mínima", 5, 20, CARGA_MINIMA_PADRAO)
+        with c_rh2: carga_max = st.number_input("Carga Máxima (Teto)", 20, 50, CARGA_MAXIMA_PADRAO)
+        with c_rh3: media_alvo = st.number_input("Média Alvo", 10, 40, MEDIA_ALVO_PADRAO)
         with c_btn:
             st.write(""); st.write("")
             if st.button("🚀 Calcular e Criar"):
@@ -688,8 +1514,482 @@ with t5:
     dp = st.data_editor(dp, num_rows="dynamic", key="edp")
     botao_salvar("Salvar Profs", "bprof")
 
-# 6. GERADOR COM DEPURAÇÃO
+# ABA 6: VAGAS - Gerador de Possibilidades
 with t6:
+    st.markdown("### 💼 Gerador de Vagas - Possibilidades de Professores")
+    st.info("💡 Use esta ferramenta para criar múltiplas vagas de professores de uma vez. Os dados serão salvos na aba Professores.")
+    
+    # Aviso sobre quota da API
+    if not sistema_seguro:
+        st.warning("⚠️ **Atenção:** Se você receber erro de 'Quota exceeded', aguarde alguns minutos. O sistema usa cache de 5 minutos para reduzir requisições à API.")
+    
+    # Botão para limpar cache manualmente (útil se dados mudaram externamente)
+    col_cache1, col_cache2 = st.columns([1, 4])
+    with col_cache1:
+        if st.button("🔄 Limpar Cache", help="Limpa o cache e recarrega dados do Google Sheets", key="btn_limpar_cache_vagas"):
+            st.cache_data.clear()
+            st.success("✅ Cache limpo! Os dados serão recarregados na próxima interação.")
+            st.rerun()
+    with col_cache2:
+        st.caption("💡 Use apenas se os dados foram alterados diretamente no Google Sheets. O cache é atualizado automaticamente a cada 5 minutos.")
+    
+    # Inicializar lista de vagas na sessão
+    if 'vagas_criadas' not in st.session_state:
+        st.session_state['vagas_criadas'] = []
+    
+    # Botão para gerar vagas automaticamente com regras de compatibilidade
+    st.markdown("---")
+    with st.expander("🤖 Gerar Vagas Automaticamente (Com Compatibilidade Fundão/Timbuí)", expanded=True):
+        st.info("🚀 Gera vagas automaticamente considerando a compatibilidade entre Fundão e Timbuí.")
+        
+        col_gen1, col_gen2, col_gen3, col_gen4 = st.columns([1, 1, 1, 1])
+        with col_gen1:
+            carga_min_auto = st.number_input("Carga Mínima", 5, 20, CARGA_MINIMA_PADRAO, key="gen_min")
+        with col_gen2:
+            carga_max_auto = st.number_input("Carga Máxima", 20, 50, CARGA_MAXIMA_PADRAO, key="gen_max")
+        with col_gen3:
+            media_alvo_auto = st.number_input("Média Alvo", 10, 40, MEDIA_ALVO_PADRAO, key="gen_media")
+        with col_gen4:
+            st.write("")
+            st.write("")
+            if st.button("🚀 Gerar Vagas Automaticamente", type="primary", use_container_width=True):
+                if dt.empty or dc.empty:
+                    st.error("❌ Configure turmas e currículo primeiro!")
+                else:
+                    with st.status("🔄 Gerando vagas automaticamente...", expanded=True) as status:
+                        # Calcular demanda por região/matéria
+                        demanda_por_regiao_materia = {}
+                        for _, turma in dt.iterrows():
+                            regiao = padronizar(turma['REGIÃO'])
+                            curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
+                            for _, item in curr.iterrows():
+                                mat = padronizar_materia_interna(item['COMPONENTE'])
+                                if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                                    chave = (regiao, mat)
+                                    demanda_por_regiao_materia[chave] = demanda_por_regiao_materia.get(chave, 0) + int(item['QTD_AULAS'])
+                        
+                        # Contar oferta existente
+                        oferta_por_regiao_materia = {}
+                        for _, prof in dp.iterrows():
+                            regiao = padronizar(prof['REGIÃO'])
+                            mats = [padronizar_materia_interna(m) for m in str(prof['COMPONENTES']).split(',') if m]
+                            carga = int(prof['CARGA_HORÁRIA']) if pd.notna(prof['CARGA_HORÁRIA']) else 0
+                            
+                            for mat in mats:
+                                chave = (regiao, mat)
+                                oferta_por_regiao_materia[chave] = oferta_por_regiao_materia.get(chave, 0) + carga
+                        
+                        # Calcular déficit
+                        deficit_por_regiao_materia = {}
+                        for chave, demanda in demanda_por_regiao_materia.items():
+                            oferta = oferta_por_regiao_materia.get(chave, 0)
+                            deficit = demanda - oferta
+                            if deficit > 0:
+                                deficit_por_regiao_materia[chave] = deficit
+                        
+                        # Agrupar déficit de Fundão e Timbuí para criar vagas compartilhadas
+                        deficit_fundao_timbui = {}
+                        deficit_outras = {}
+                        
+                        for (regiao, materia), deficit in deficit_por_regiao_materia.items():
+                            if regiao in ["FUNDÃO", "TIMBUÍ"]:
+                                if materia not in deficit_fundao_timbui:
+                                    deficit_fundao_timbui[materia] = {"FUNDÃO": 0, "TIMBUÍ": 0}
+                                deficit_fundao_timbui[materia][regiao] = deficit
+                            else:
+                                deficit_outras[(regiao, materia)] = deficit
+                        
+                        # Gerar códigos
+                        numeros_existentes = []
+                        for _, p_row in dp.iterrows():
+                            match = re.search(r'P(\d+)', str(p_row['CÓDIGO']))
+                            if match:
+                                numeros_existentes.append(int(match.group(1)))
+                        
+                        proximo_numero = max(numeros_existentes) + 1 if numeros_existentes else 1
+                        
+                        vagas_geradas = []
+                        
+                        # Criar vagas compartilhadas Fundão/Timbuí
+                        for materia, deficits in deficit_fundao_timbui.items():
+                            demanda_fundao = deficits["FUNDÃO"]
+                            demanda_timbui = deficits["TIMBUÍ"]
+                            demanda_total = demanda_fundao + demanda_timbui
+                            
+                            if demanda_total > 0:
+                                status.write(f"📊 {materia}: Fundão ({demanda_fundao} aulas) + Timbuí ({demanda_timbui} aulas) = {demanda_total} aulas")
+                                
+                                # Distribuir carga inteligentemente
+                                cargas = distribuir_carga_inteligente(demanda_total, None)
+                                
+                                for carga in cargas:
+                                    if carga > 0:
+                                        codigo = gerar_codigo_padrao(proximo_numero, "DT", "FUNDAO", materia)
+                                        proximo_numero += 1
+                                        
+                                        pl_calculado = calcular_pl_ldb(carga)
+                                        
+                                        # Buscar escolas de ambas as regiões
+                                        escolas_fundao = list(set(dt[dt['REGIÃO'] == "FUNDÃO"]['ESCOLA'].unique())) if not dt.empty else []
+                                        escolas_timbui = list(set(dt[dt['REGIÃO'] == "TIMBUÍ"]['ESCOLA'].unique())) if not dt.empty else []
+                                        todas_escolas = escolas_fundao[:2] + escolas_timbui[:2]
+                                        
+                                        vagas_geradas.append({
+                                            "CÓDIGO": codigo,
+                                            "NOME": f"VAGA {materia} FUNDÃO/TIMBUÍ",
+                                            "COMPONENTES": materia,
+                                            "CARGA_HORÁRIA": carga,
+                                            "REGIÃO": "FUNDÃO",  # Região principal (compatível com Timbuí)
+                                            "VÍNCULO": "DT",
+                                            "TURNO_FIXO": "",
+                                            "ESCOLAS_ALOCADAS": ",".join(todas_escolas[:4]) if todas_escolas else "",
+                                            "QTD_PL": pl_calculado
+                                        })
+                                        
+                                        status.write(f"  ✅ Criada vaga compartilhada: {carga}h")
+                        
+                        # Criar vagas para outras regiões
+                        for (regiao, materia), deficit in deficit_outras.items():
+                            if deficit > 0:
+                                status.write(f"📊 {materia} - {regiao}: {deficit} aulas")
+                                
+                                cargas = distribuir_carga_inteligente(deficit, None)
+                                
+                                for carga in cargas:
+                                    if carga > 0:
+                                        codigo = gerar_codigo_padrao(proximo_numero, "DT", regiao, materia)
+                                        proximo_numero += 1
+                                        
+                                        pl_calculado = calcular_pl_ldb(carga)
+                                        
+                                        escolas_regiao = list(set(dt[dt['REGIÃO'] == regiao]['ESCOLA'].unique())) if not dt.empty else []
+                                        
+                                        vagas_geradas.append({
+                                            "CÓDIGO": codigo,
+                                            "NOME": f"VAGA {materia} {regiao}",
+                                            "COMPONENTES": materia,
+                                            "CARGA_HORÁRIA": carga,
+                                            "REGIÃO": regiao,
+                                            "VÍNCULO": "DT",
+                                            "TURNO_FIXO": "",
+                                            "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]) if escolas_regiao else "",
+                                            "QTD_PL": pl_calculado
+                                        })
+                                        
+                                        status.write(f"  ✅ Criada vaga: {carga}h")
+                        
+                        if vagas_geradas:
+                            # Adicionar à lista de vagas
+                            st.session_state['vagas_criadas'].extend(vagas_geradas)
+                            status.update(label=f"✅ {len(vagas_geradas)} vagas geradas!", state="complete")
+                            st.success(f"✅ {len(vagas_geradas)} vagas geradas automaticamente! Revise na lista abaixo.")
+                            st.rerun()
+                        else:
+                            status.update(label="✅ Nenhuma vaga necessária!", state="complete")
+                            st.info("✅ Todas as demandas estão cobertas pelos professores existentes!")
+    
+    # Formulário para criar vagas
+    with st.expander("➕ Criar Nova Vaga", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            materia_vaga = st.selectbox("📚 Matéria", MATERIAS_ESPECIALISTAS, key="vag_mat")
+            # Permitir seleção múltipla de regiões, especialmente Fundão e Timbuí juntas
+            regioes_vaga = st.multiselect(
+                "📍 Região(ões) - Pode selecionar múltiplas (Fundão + Timbuí são compatíveis)",
+                REGIOES,
+                default=[],
+                key="vag_reg"
+            )
+            vinculo_vaga = st.radio("🔗 Vínculo", VINCULOS, horizontal=True, key="vag_vin")
+        
+        with col2:
+            carga_vaga = st.number_input("⏰ Carga Horária (Aulas)", min_value=1, max_value=50, value=20, key="vag_carga")
+            quantidade_vagas = st.number_input("🔢 Quantidade de Vagas", min_value=1, max_value=50, value=1, key="vag_qtd")
+        
+        # Aviso sobre compatibilidade Fundão/Timbuí
+        if "FUNDÃO" in regioes_vaga and "TIMBUÍ" in regioes_vaga:
+            st.info("✅ Fundão e Timbuí são compatíveis! O professor poderá dar aula em ambas as regiões.")
+        elif len(regioes_vaga) > 1:
+            regioes_incompativeis = []
+            if "PRAIA GRANDE" in regioes_vaga:
+                if "FUNDÃO" in regioes_vaga or "TIMBUÍ" in regioes_vaga:
+                    st.warning("⚠️ Praia Grande não é compatível com Fundão ou Timbuí. Selecione apenas uma dessas regiões.")
+        
+        # Campos opcionais para professores efetivos
+        escolas_vaga = []
+        turno_fixo_vaga = ""
+        if vinculo_vaga == "EFETIVO":
+            col3, col4 = st.columns(2)
+            with col3:
+                escolas_vaga = st.multiselect(
+                    "🏫 Escolas Base (Opcional)",
+                    sorted(dt['ESCOLA'].unique()) if not dt.empty else [],
+                    key="vag_esc"
+                )
+            with col4:
+                turno_fixo_vaga = st.selectbox(
+                    "⏰ Turno Fixo (Opcional)",
+                    ["", "MATUTINO", "VESPERTINO", "AMBOS"],
+                    key="vag_turno"
+                )
+        
+        # Botão para adicionar à lista
+        if st.button("➕ Adicionar à Lista de Vagas", type="primary", use_container_width=True):
+            if not regioes_vaga:
+                st.error("❌ Selecione pelo menos uma região!")
+            else:
+                # Validar compatibilidade de regiões
+                if "PRAIA GRANDE" in regioes_vaga and ("FUNDÃO" in regioes_vaga or "TIMBUÍ" in regioes_vaga):
+                    st.error("❌ Praia Grande não pode ser combinada com Fundão ou Timbuí!")
+                else:
+                    # Calcular PL automaticamente
+                    pl_calculado = calcular_pl_ldb(carga_vaga)
+                    
+                    # Gerar códigos para cada vaga
+                    numeros_existentes = []
+                    for _, p_row in dp.iterrows():
+                        match = re.search(r'P(\d+)', str(p_row['CÓDIGO']))
+                        if match:
+                            numeros_existentes.append(int(match.group(1)))
+                    
+                    proximo_numero = max(numeros_existentes) + 1 if numeros_existentes else 1
+                    
+                    # Se múltiplas regiões compatíveis (Fundão + Timbuí), criar uma vaga compartilhada
+                    if len(regioes_vaga) > 1 and "FUNDÃO" in regioes_vaga and "TIMBUÍ" in regioes_vaga:
+                        # Criar vaga compartilhada Fundão + Timbuí
+                        regiao_compartilhada = "FUNDÃO/TIMBUÍ"
+                        for i in range(quantidade_vagas):
+                            codigo = gerar_codigo_padrao(proximo_numero + i, vinculo_vaga, "FUNDAO", materia_vaga)
+                            
+                            # Buscar escolas de ambas as regiões
+                            escolas_fundao = list(set(dt[dt['REGIÃO'] == "FUNDÃO"]['ESCOLA'].unique())) if not dt.empty else []
+                            escolas_timbui = list(set(dt[dt['REGIÃO'] == "TIMBUÍ"]['ESCOLA'].unique())) if not dt.empty else []
+                            todas_escolas = escolas_fundao[:2] + escolas_timbui[:2]  # Até 2 de cada
+                            
+                            vaga = {
+                                "CÓDIGO": codigo,
+                                "NOME": f"VAGA {materia_vaga} FUNDÃO/TIMBUÍ",
+                                "COMPONENTES": materia_vaga,
+                                "CARGA_HORÁRIA": carga_vaga,
+                                "REGIÃO": "FUNDÃO",  # Usar Fundão como região principal (compatível com Timbuí)
+                                "VÍNCULO": vinculo_vaga,
+                                "TURNO_FIXO": turno_fixo_vaga,
+                                "ESCOLAS_ALOCADAS": ",".join(todas_escolas[:4]) if todas_escolas else "",
+                                "QTD_PL": pl_calculado
+                            }
+                            
+                            st.session_state['vagas_criadas'].append(vaga)
+                        
+                        st.success(f"✅ {quantidade_vagas} vaga(s) compartilhada(s) Fundão/Timbuí adicionada(s)!")
+                    else:
+                        # Criar vagas separadas para cada região
+                        for regiao_vaga in regioes_vaga:
+                            for i in range(quantidade_vagas):
+                                codigo = gerar_codigo_padrao(proximo_numero, vinculo_vaga, regiao_vaga, materia_vaga)
+                                proximo_numero += 1
+                                
+                                escolas_regiao = list(set(dt[dt['REGIÃO'] == regiao_vaga]['ESCOLA'].unique())) if not dt.empty else []
+                                
+                                vaga = {
+                                    "CÓDIGO": codigo,
+                                    "NOME": f"VAGA {materia_vaga} {regiao_vaga}",
+                                    "COMPONENTES": materia_vaga,
+                                    "CARGA_HORÁRIA": carga_vaga,
+                                    "REGIÃO": regiao_vaga,
+                                    "VÍNCULO": vinculo_vaga,
+                                    "TURNO_FIXO": turno_fixo_vaga,
+                                    "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]) if escolas_regiao else "",
+                                    "QTD_PL": pl_calculado
+                                }
+                                
+                                st.session_state['vagas_criadas'].append(vaga)
+                        
+                        st.success(f"✅ {len(regioes_vaga) * quantidade_vagas} vaga(s) adicionada(s) à lista!")
+                    
+                    st.rerun()
+    
+    # Lista de vagas criadas
+    st.markdown("---")
+    st.markdown("### 📋 Lista de Vagas Criadas")
+    
+    if st.session_state['vagas_criadas']:
+        df_vagas = pd.DataFrame(st.session_state['vagas_criadas'])
+        
+        # Mostrar estatísticas
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total de Vagas", len(df_vagas))
+        with col2:
+            st.metric("Total de Aulas", df_vagas['CARGA_HORÁRIA'].sum())
+        with col3:
+            st.metric("Total de PL", df_vagas['QTD_PL'].sum())
+        with col4:
+            st.metric("Carga Total", df_vagas['CARGA_HORÁRIA'].sum() + df_vagas['QTD_PL'].sum())
+        
+        # Tabela editável
+        st.markdown("#### ✏️ Editar Vagas (opcional)")
+        df_vagas_editado = st.data_editor(
+            df_vagas,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="ed_vagas",
+            column_config={
+                "CÓDIGO": st.column_config.TextColumn("Código", width="medium"),
+                "NOME": st.column_config.TextColumn("Nome", width="large"),
+                "COMPONENTES": st.column_config.SelectboxColumn("Matéria", options=MATERIAS_ESPECIALISTAS),
+                "CARGA_HORÁRIA": st.column_config.NumberColumn("Carga (Aulas)", min_value=1, max_value=50),
+                "REGIÃO": st.column_config.SelectboxColumn("Região", options=REGIOES),
+                "VÍNCULO": st.column_config.SelectboxColumn("Vínculo", options=VINCULOS),
+                "TURNO_FIXO": st.column_config.SelectboxColumn("Turno Fixo", options=["", "MATUTINO", "VESPERTINO", "AMBOS"]),
+                "ESCOLAS_ALOCADAS": st.column_config.TextColumn("Escolas"),
+                "QTD_PL": st.column_config.NumberColumn("PL", min_value=0, max_value=20)
+            }
+        )
+        
+        # Atualizar lista de vagas se houver edição
+        st.session_state['vagas_criadas'] = df_vagas_editado.to_dict('records')
+        
+        # Botões de ação
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+        
+        with col_btn1:
+            if st.button("🗑️ Limpar Lista", use_container_width=True):
+                st.session_state['vagas_criadas'] = []
+                st.rerun()
+        
+        with col_btn2:
+            if st.button("💾 Salvar no Banco de Dados", type="primary", use_container_width=True):
+                if sistema_seguro:
+                    # Verificar códigos duplicados
+                    codigos_existentes = set(dp['CÓDIGO'].astype(str))
+                    codigos_novos = set(df_vagas_editado['CÓDIGO'].astype(str))
+                    duplicados = codigos_existentes.intersection(codigos_novos)
+                    
+                    if duplicados:
+                        st.error(f"❌ Códigos duplicados encontrados: {', '.join(duplicados)}")
+                        st.info("💡 Edite os códigos na tabela acima ou remova as vagas duplicadas.")
+                    else:
+                        # Adicionar novas vagas ao DataFrame de professores
+                        dp_novo = pd.concat([dp, df_vagas_editado], ignore_index=True)
+                        
+                        # Recalcular PL se necessário (atualizar no DataFrame antes de salvar)
+                        for idx in df_vagas_editado.index:
+                            pl_calculado = calcular_pl_ldb(df_vagas_editado.loc[idx, 'CARGA_HORÁRIA'])
+                            df_vagas_editado.loc[idx, 'QTD_PL'] = pl_calculado
+                        
+                        # Salvar no banco
+                        salvar_seguro(dt, dc, dp_novo, dd, da)
+                        
+                        # Limpar lista de vagas
+                        st.session_state['vagas_criadas'] = []
+                        
+                        st.success(f"✅ {len(df_vagas_editado)} vaga(s) salva(s) com sucesso na aba Professores!")
+                        st.rerun()
+                else:
+                    st.warning("⚠️ Configure a conexão com Google Sheets primeiro.")
+        
+        with col_btn3:
+            st.write("")  # Espaço
+        
+        # Preview das vagas
+        st.markdown("---")
+        st.markdown("#### 👁️ Preview das Vagas")
+        
+        # Agrupar por região e matéria
+        df_agrupado = df_vagas_editado.groupby(['REGIÃO', 'COMPONENTES']).agg({
+            'CARGA_HORÁRIA': ['sum', 'count'],
+            'QTD_PL': 'sum'
+        }).reset_index()
+        
+        df_agrupado.columns = ['Região', 'Matéria', 'Total Aulas', 'Qtd Vagas', 'Total PL']
+        df_agrupado['Carga Total'] = df_agrupado['Total Aulas'] + df_agrupado['Total PL']
+        
+        st.dataframe(df_agrupado, use_container_width=True, hide_index=True)
+        
+    else:
+        st.info("📝 Nenhuma vaga criada ainda. Use o formulário acima para adicionar vagas.")
+        
+        # Sugestão baseada na demanda
+        if not dt.empty and not dc.empty:
+            st.markdown("---")
+            st.markdown("#### 💡 Sugestão Baseada na Demanda")
+            
+            # Calcular demanda por região/matéria
+            demanda_por_regiao_materia = {}
+            for _, turma in dt.iterrows():
+                regiao = turma['REGIÃO']
+                curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
+                for _, item in curr.iterrows():
+                    mat = padronizar_materia_interna(item['COMPONENTE'])
+                    if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                        chave = (regiao, mat)
+                        demanda_por_regiao_materia[chave] = demanda_por_regiao_materia.get(chave, 0) + int(item['QTD_AULAS'])
+            
+            if demanda_por_regiao_materia:
+                st.write("**Demanda identificada:**")
+                sugestoes = []
+                sugestoes_compartilhadas = []
+                
+                # Agrupar demandas de Fundão e Timbuí para sugerir vagas compartilhadas
+                demanda_fundao_timbui = {}
+                for (regiao, materia), demanda in demanda_por_regiao_materia.items():
+                    if regiao in ["FUNDÃO", "TIMBUÍ"]:
+                        chave = materia
+                        if chave not in demanda_fundao_timbui:
+                            demanda_fundao_timbui[chave] = {"FUNDÃO": 0, "TIMBUÍ": 0}
+                        demanda_fundao_timbui[chave][regiao] = demanda
+                
+                # Criar sugestões compartilhadas para Fundão/Timbuí
+                for materia, demandas in demanda_fundao_timbui.items():
+                    demanda_total = demandas["FUNDÃO"] + demandas["TIMBUÍ"]
+                    if demanda_total > 0:
+                        num_profs = math.ceil(demanda_total / MEDIA_ALVO_PADRAO)
+                        cargas = distribuir_carga_inteligente(demanda_total, num_profs)
+                        
+                        sugestoes_compartilhadas.append({
+                            'Região': 'FUNDÃO/TIMBUÍ (Compartilhada)',
+                            'Matéria': materia,
+                            'Demanda Fundão': demandas["FUNDÃO"],
+                            'Demanda Timbuí': demandas["TIMBUÍ"],
+                            'Demanda Total': demanda_total,
+                            'Sugestão de Vagas': len(cargas),
+                            'Cargas Sugeridas': ', '.join(map(str, cargas))
+                        })
+                
+                # Criar sugestões individuais (excluindo Fundão e Timbuí que já estão nas compartilhadas)
+                for (regiao, materia), demanda in sorted(demanda_por_regiao_materia.items()):
+                    if regiao not in ["FUNDÃO", "TIMBUÍ"]:
+                        num_profs = math.ceil(demanda / MEDIA_ALVO_PADRAO)
+                        cargas = distribuir_carga_inteligente(demanda, num_profs)
+                        
+                        sugestoes.append({
+                            'Região': regiao,
+                            'Matéria': materia,
+                            'Demanda': demanda,
+                            'Sugestão de Vagas': len(cargas),
+                            'Cargas Sugeridas': ', '.join(map(str, cargas))
+                        })
+                
+                # Mostrar sugestões compartilhadas primeiro
+                if sugestoes_compartilhadas:
+                    st.markdown("**🌟 Vagas Compartilhadas Recomendadas (Fundão + Timbuí):**")
+                    df_sugestoes_comp = pd.DataFrame(sugestoes_compartilhadas)
+                    st.dataframe(df_sugestoes_comp, use_container_width=True, hide_index=True)
+                    st.info("💡 **Dica:** Selecione 'FUNDÃO' e 'TIMBUÍ' juntas no formulário acima para criar vagas compartilhadas!")
+                
+                # Mostrar outras sugestões
+                if sugestoes:
+                    if sugestoes_compartilhadas:
+                        st.markdown("**Outras sugestões:**")
+                    df_sugestoes = pd.DataFrame(sugestoes)
+                    st.dataframe(df_sugestoes, use_container_width=True, hide_index=True)
+                
+                if not sugestoes_compartilhadas and not sugestoes:
+                    st.info("💡 Use essas sugestões como referência ao criar vagas manualmente.")
+
+# ABA 7: GERADOR (MANTENHA O MESMO CÓDIGO)
+with t7:
     if sistema_seguro:
         st.subheader("🔍 Depuração da Demanda")
         
@@ -721,9 +2021,24 @@ with t6:
         
         if st.button("🚀 Gerar e Salvar Grade (COM CONTROLE)"):
             with st.status("Processando Rede...", expanded=True) as status:
+                # Verificar se há dados suficientes
+                if dt.empty:
+                    st.error("❌ Não há turmas cadastradas!")
+                    st.stop()
+                if dc.empty:
+                    st.error("❌ Não há currículo configurado!")
+                    st.stop()
+                if dp.empty:
+                    st.warning("⚠️ Não há professores cadastrados! O sistema criará professores automaticamente.")
+                
                 profs_obj = carregar_objs(dp)
                 rotas_obj = carregar_rotas(da)
                 map_esc_reg = dict(zip(dt['ESCOLA'], dt['REGIÃO']))
+                
+                status.write(f"📊 Dados carregados:")
+                status.write(f"  • {len(dt)} turmas")
+                status.write(f"  • {len(profs_obj)} professores")
+                status.write(f"  • {len(rotas_obj)} rotas configuradas")
                 
                 merged = pd.merge(dt, dd, on="SÉRIE/ANO", how="left").fillna({'DIA_PLANEJAMENTO': 'NÃO CONFIGURADO'})
                 escolas = merged['ESCOLA'].unique()
@@ -739,80 +2054,250 @@ with t6:
                 novos_horarios = []
                 escolas_processadas = 0
                 
-                # CORREÇÃO: Usar flag para NÃO criar professores durante resolução
-                CRIAR_TEMPORARIOS = False
-                
                 for esc in escolas:
                     status.write(f"  • Processando escola: {esc}")
                     df_e = merged[merged['ESCOLA'] == esc]
                     
-                    for _, b in df_e[['DIA_PLANEJAMENTO', 'TURNO']].drop_duplicates().iterrows():
-                        dia, turno = b['DIA_PLANEJAMENTO'], b['TURNO']
-                        turmas_f = df_e[(df_e['DIA_PLANEJAMENTO']==dia) & (df_e['TURNO']==turno)]
-                        
-                        lt = [{
-                            'nome_turma': r['TURMA'], 
-                            'ano': r['SÉRIE/ANO'], 
-                            'escola_real': esc, 
-                            'regiao_real': r['REGIÃO']
-                        } for _, r in turmas_f.iterrows()]
-                        
-                        # Resetar ocup antes de cada dia/turno
-                        for p in profs_obj:
-                            p['ocup'] = {}
-                        
-                        # Resolve a grade SEM criar novos professores
-                        sucesso, res, mensagem, profs_obj = resolver_grade_inteligente(
-                            lt, dc, profs_obj, rotas_obj, turno, map_esc_reg
-                        )
-                        
-                        status.write(f"    • {dia} - {turno}: {mensagem}")
-                        
-                        for t_nome, aulas in res.items():
-                            novos_horarios.append([esc, t_nome, turno, dia] + aulas)
+                    # Processar TODAS as combinações de dia/turno, mesmo sem DIA_PLANEJAMENTO configurado
+                    combinacoes = df_e[['DIA_PLANEJAMENTO', 'TURNO']].drop_duplicates()
+                    
+                    # Se não houver DIA_PLANEJAMENTO configurado, processar por turno apenas
+                    if combinacoes.empty or combinacoes['DIA_PLANEJAMENTO'].isna().all():
+                        turnos = df_e['TURNO'].unique()
+                        for turno in turnos:
+                            turmas_f = df_e[df_e['TURNO'] == turno]
+                            dia = 'NÃO CONFIGURADO'
+                            
+                            lt = [{
+                                'nome_turma': r['TURMA'], 
+                                'ano': r['SÉRIE/ANO'], 
+                                'escola_real': esc, 
+                                'regiao_real': r['REGIÃO']
+                            } for _, r in turmas_f.iterrows()]
+                            
+                            if not lt:  # Pular se não houver turmas
+                                continue
+                            
+                            # Resetar ocup antes de cada dia/turno (cada dia/turno é independente)
+                            for p in profs_obj:
+                                p['ocup'] = {}
+                            
+                            # Resolve a grade (NÃO cria professores - apenas marca "---" se não encontrar)
+                            sucesso, res, mensagem, profs_obj = resolver_grade_inteligente(
+                                lt, dc, profs_obj, rotas_obj, turno, map_esc_reg
+                            )
+                            
+                            # Contar quantas aulas foram alocadas corretamente
+                            total_alocadas = sum(sum(1 for a in aulas if a and a != "---" and a is not None) for aulas in res.values()) if res else 0
+                            
+                            # Contar aulas esperadas baseado no currículo
+                            total_esperadas = 0
+                            for turma in lt:
+                                curr_turma = dc[dc['SÉRIE/ANO'] == turma['ano']]
+                                for _, item_curr in curr_turma.iterrows():
+                                    mat_curr = padronizar_materia_interna(item_curr['COMPONENTE'])
+                                    if mat_curr in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                                        total_esperadas += int(item_curr['QTD_AULAS'])
+                            
+                            status.write(f"    • {dia} - {turno}: {mensagem} ({len(lt)} turmas, {total_alocadas}/{total_esperadas} aulas alocadas)")
+                            
+                            # Diagnóstico detalhado se não alocou nada
+                            if total_alocadas == 0 and total_esperadas > 0:
+                                status.write(f"      ⚠️ NENHUMA aula alocada! Verificando professores disponíveis...")
+                                materias_necessarias = set()
+                                for turma in lt:
+                                    curr_turma = dc[dc['SÉRIE/ANO'] == turma['ano']]
+                                    for _, item_curr in curr_turma.iterrows():
+                                        mat_curr = padronizar_materia_interna(item_curr['COMPONENTE'])
+                                        if mat_curr in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                                            materias_necessarias.add(mat_curr)
+                                
+                                for mat_nec in materias_necessarias:
+                                    reg_nec = padronizar(lt[0]['regiao_real']) if lt else ""
+                                    profs_disponiveis = sum(1 for p in profs_obj if mat_nec in p['mats'] and 
+                                                           p['atrib'] < min(p['max'], REGRA_CARGA_HORARIA["maximo_aulas"]))
+                                    pode_regiao = sum(1 for p in profs_obj if mat_nec in p['mats'] and 
+                                                     verificar_compatibilidade_regiao(p['reg'], reg_nec, mat_nec)[0])
+                                    status.write(f"        • {mat_nec}: {profs_disponiveis} profs disponíveis, {pode_regiao} compatíveis com região {reg_nec}")
+                            
+                            for t_nome, aulas in res.items():
+                                novos_horarios.append([esc, t_nome, turno, dia] + aulas)
+                    else:
+                        # Processar normalmente com DIA_PLANEJAMENTO configurado
+                        for _, b in combinacoes.iterrows():
+                            dia, turno = b['DIA_PLANEJAMENTO'], b['TURNO']
+                            turmas_f = df_e[(df_e['DIA_PLANEJAMENTO']==dia) & (df_e['TURNO']==turno)]
+                            
+                            lt = [{
+                                'nome_turma': r['TURMA'], 
+                                'ano': r['SÉRIE/ANO'], 
+                                'escola_real': esc, 
+                                'regiao_real': r['REGIÃO']
+                            } for _, r in turmas_f.iterrows()]
+                            
+                            if not lt:  # Pular se não houver turmas
+                                continue
+                            
+                            # Resetar ocup antes de cada dia/turno (cada dia/turno é independente)
+                            for p in profs_obj:
+                                p['ocup'] = {}
+                            
+                            # Resolve a grade (NÃO cria professores - apenas marca "---" se não encontrar)
+                            sucesso, res, mensagem, profs_obj = resolver_grade_inteligente(
+                                lt, dc, profs_obj, rotas_obj, turno, map_esc_reg
+                            )
+                            
+                            # Contar quantas aulas foram alocadas corretamente
+                            total_alocadas = sum(sum(1 for a in aulas if a and a != "---" and a is not None) for aulas in res.values()) if res else 0
+                            
+                            # Contar aulas esperadas baseado no currículo
+                            total_esperadas = 0
+                            for turma in lt:
+                                curr_turma = dc[dc['SÉRIE/ANO'] == turma['ano']]
+                                for _, item_curr in curr_turma.iterrows():
+                                    mat_curr = padronizar_materia_interna(item_curr['COMPONENTE'])
+                                    if mat_curr in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                                        total_esperadas += int(item_curr['QTD_AULAS'])
+                            
+                            status.write(f"    • {dia} - {turno}: {mensagem} ({len(lt)} turmas, {total_alocadas}/{total_esperadas} aulas alocadas)")
+                            
+                            # Diagnóstico detalhado se não alocou nada
+                            if total_alocadas == 0 and total_esperadas > 0:
+                                status.write(f"      ⚠️ NENHUMA aula alocada! Verificando professores disponíveis...")
+                                materias_necessarias = set()
+                                for turma in lt:
+                                    curr_turma = dc[dc['SÉRIE/ANO'] == turma['ano']]
+                                    for _, item_curr in curr_turma.iterrows():
+                                        mat_curr = padronizar_materia_interna(item_curr['COMPONENTE'])
+                                        if mat_curr in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                                            materias_necessarias.add(mat_curr)
+                                
+                                for mat_nec in materias_necessarias:
+                                    reg_nec = padronizar(lt[0]['regiao_real']) if lt else ""
+                                    profs_disponiveis = sum(1 for p in profs_obj if mat_nec in p['mats'] and 
+                                                           p['atrib'] < min(p['max'], REGRA_CARGA_HORARIA["maximo_aulas"]))
+                                    pode_regiao = sum(1 for p in profs_obj if mat_nec in p['mats'] and 
+                                                     verificar_compatibilidade_regiao(p['reg'], reg_nec, mat_nec)[0])
+                                    status.write(f"        • {mat_nec}: {profs_disponiveis} profs disponíveis, {pode_regiao} compatíveis com região {reg_nec}")
+                            
+                            for t_nome, aulas in res.items():
+                                novos_horarios.append([esc, t_nome, turno, dia] + aulas)
                     
                     escolas_processadas += 1
                 
-                # ===== FASE 2: CONSOLIDAR VAGAS NÃO PREENCHIDAS E CRIAR PROFESSORES =====
-                status.write("📊 Analisando demanda não atendida...")
+                # NÃO converter professores criados durante alocação
+                # Tudo será consolidado na FASE 2 abaixo
+                
+                # Atualizar cargas horárias dos professores existentes baseado nas alocações
+                status.write("📊 Atualizando cargas horárias e PL dos professores...")
+                for p_obj in profs_obj:
+                    # Encontrar professor no DataFrame
+                    idx = dp[dp['CÓDIGO'] == p_obj['id']].index
+                    if len(idx) > 0:
+                        # Atualizar carga horária com base nas atribuições reais
+                        carga_atual = p_obj['atrib']
+                        if carga_atual > 0:
+                            dp.loc[idx[0], 'CARGA_HORÁRIA'] = max(carga_atual, dp.loc[idx[0], 'CARGA_HORÁRIA'])
+                            
+                            # REGRA 5: Atualizar PL baseado na LDB
+                            pl_ldb = calcular_pl_ldb(dp.loc[idx[0], 'CARGA_HORÁRIA'])
+                            dp.loc[idx[0], 'QTD_PL'] = pl_ldb
+                            
+                            # Atualizar escolas alocadas
+                            escolas_reais = ','.join(p_obj['escolas_reais']) if p_obj['escolas_reais'] else dp.loc[idx[0], 'ESCOLAS_ALOCADAS']
+                            if escolas_reais:
+                                dp.loc[idx[0], 'ESCOLAS_ALOCADAS'] = escolas_reais
+                
+                # ===== FASE 2: CONSOLIDAR VAGAS NÃO PREENCHIDAS =====
+                status.write("📊 Analisando demanda não atendida e consolidando...")
                 
                 # Contar demanda não preenchida por região/matéria
+                # Método melhorado: contar slots "---" e identificar matéria pela posição no currículo
                 demanda_nao_preenchida = {}
                 
-                for _, row in pd.DataFrame(novos_horarios, columns=COLS_PADRAO["Horario"]).iterrows():
-                    for col in ['1ª', '2ª', '3ª', '4ª', '5ª']:
-                        prof_id = row[col]
-                        if prof_id == '---':
-                            # Encontrar qual era a demanda original
-                            esc = row['ESCOLA']
-                            turma = row['TURMA']
-                            turno = row['TURNO']
-                            dia = row['DIA']
-                            
-                            # Procurar na estrutura de turmas qual matéria falta
-                            df_turma = dt[(dt['ESCOLA'] == esc) & (dt['TURMA'] == turma)]
-                            if not df_turma.empty:
-                                serie = df_turma.iloc[0]['SÉRIE/ANO']
-                                regiao = df_turma.iloc[0]['REGIÃO']
-                                curr = dc[dc['SÉRIE/ANO'] == serie]
-                                
-                                for _, item in curr.iterrows():
-                                    mat = padronizar_materia_interna(item['COMPONENTE'])
-                                    if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                                        chave = (padronizar(regiao), mat)
-                                        demanda_nao_preenchida[chave] = demanda_nao_preenchida.get(chave, 0) + 1
+                # Criar DataFrame de horários para análise
+                df_horarios_temp = pd.DataFrame(novos_horarios, columns=COLS_PADRAO["Horario"])
                 
-                status.write(f"Demanda não preenchida: {demanda_nao_preenchida}")
+                # Agrupar por escola/turma para processar uma vez cada
+                turmas_processadas = set()
+                
+                for _, row in df_horarios_temp.iterrows():
+                    esc = row['ESCOLA']
+                    turma_nome = row['TURMA']
+                    chave_turma = (esc, turma_nome)
+                    
+                    if chave_turma in turmas_processadas:
+                        continue
+                    turmas_processadas.add(chave_turma)
+                    
+                    # Encontrar informações da turma
+                    df_turma = dt[(dt['ESCOLA'] == esc) & (dt['TURMA'] == turma_nome)]
+                    if df_turma.empty:
+                        continue
+                    
+                    serie = df_turma.iloc[0]['SÉRIE/ANO']
+                    regiao = padronizar(df_turma.iloc[0]['REGIÃO'])
+                    
+                    # Buscar currículo da série e criar lista de aulas esperadas
+                    curr = dc[dc['SÉRIE/ANO'] == serie]
+                    aulas_esperadas = []
+                    for _, item in curr.iterrows():
+                        mat = padronizar_materia_interna(item['COMPONENTE'])
+                        if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                            qtd = int(item['QTD_AULAS'])
+                            aulas_esperadas.extend([mat] * qtd)
+                    
+                    # Buscar todas as linhas dessa turma no horário
+                    linhas_turma = df_horarios_temp[(df_horarios_temp['ESCOLA'] == esc) & 
+                                                    (df_horarios_temp['TURMA'] == turma_nome)]
+                    
+                    # Contar quantas aulas de cada matéria foram alocadas
+                    materias_alocadas = {}
+                    for _, linha in linhas_turma.iterrows():
+                        for col in ['1ª', '2ª', '3ª', '4ª', '5ª']:
+                            prof_id = linha[col]
+                            if prof_id != '---' and prof_id:
+                                # Encontrar matéria do professor
+                                prof_df = dp[dp['CÓDIGO'] == prof_id]
+                                if not prof_df.empty:
+                                    comps = str(prof_df.iloc[0]['COMPONENTES'])
+                                    mats_prof = [padronizar_materia_interna(m.strip()) for m in comps.split(',') if m.strip()]
+                                    for mat_prof in mats_prof:
+                                        if mat_prof in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                                            materias_alocadas[mat_prof] = materias_alocadas.get(mat_prof, 0) + 1
+                    
+                    # Contar quantas aulas de cada matéria faltam
+                    materias_esperadas_dict = {}
+                    for mat in aulas_esperadas:
+                        materias_esperadas_dict[mat] = materias_esperadas_dict.get(mat, 0) + 1
+                    
+                    # Calcular déficit
+                    for mat, qtd_esperada in materias_esperadas_dict.items():
+                        qtd_alocada = materias_alocadas.get(mat, 0)
+                        deficit = qtd_esperada - qtd_alocada
+                        if deficit > 0:
+                            chave = (regiao, mat)
+                            demanda_nao_preenchida[chave] = demanda_nao_preenchida.get(chave, 0) + deficit
+                
+                total_aulas_faltando = sum(demanda_nao_preenchida.values())
+                status.write(f"📊 Total de aulas não preenchidas: {total_aulas_faltando} em {len(demanda_nao_preenchida)} combinações região/matéria")
+                
+                # Mostrar detalhes
+                if demanda_nao_preenchida:
+                    status.write("📋 Detalhes por região/matéria:")
+                    for (reg, mat), qtd in sorted(demanda_nao_preenchida.items()):
+                        status.write(f"  • {mat} - {reg}: {qtd} aulas faltando")
                 
                 # ===== CRIAR NOVOS PROFESSORES CONSOLIDADOS =====
                 if demanda_nao_preenchida:
-                    status.write("🔄 Criando novos professores consolidados...")
+                    status.write("🔄 Criando novos professores consolidados para vagas não preenchidas...")
                     
                     novos_profs = []
                     numeros_existentes = []
                     
-                    for p in profs_obj:
-                        match = re.search(r'P(\d+)', p['id'])
+                    # Coletar números existentes de todos os professores (incluindo os criados durante alocação)
+                    for _, p_row in dp.iterrows():
+                        match = re.search(r'P(\d+)', str(p_row['CÓDIGO']))
                         if match:
                             numeros_existentes.append(int(match.group(1)))
                     
@@ -822,33 +2307,42 @@ with t6:
                         if qtd_aulas <= 0:
                             continue
                         
-                        # Aplicar regras de carga
-                        carga_min, carga_max, media_alvo = 14, 30, 20
+                        # REGRA 7: Distribuir carga de forma inteligente
+                        cargas = distribuir_carga_inteligente(qtd_aulas)
                         
-                        # Quantos professores necessários?
-                        qtd_profs = max(1, math.ceil(qtd_aulas / media_alvo))
-                        carga_por_prof = qtd_aulas / qtd_profs
-                        
-                        # Ajustar para respeitar limites
-                        while qtd_profs > 1 and carga_por_prof < carga_min:
-                            qtd_profs -= 1
-                            carga_por_prof = qtd_aulas / qtd_profs
-                        
-                        while carga_por_prof > carga_max:
-                            qtd_profs += 1
-                            carga_por_prof = qtd_aulas / qtd_profs
-                        
-                        # Distribuir carga
-                        cargas = []
-                        restante = qtd_aulas
-                        
-                        for i in range(qtd_profs):
-                            if i == qtd_profs - 1:
-                                carga = restante
+                        # Validar cada carga
+                        cargas_validas = []
+                        for carga in cargas:
+                            valido, msg = verificar_limites_carga(carga, qtd_aulas)
+                            if valido:
+                                cargas_validas.append(carga)
                             else:
-                                carga = min(carga_max, max(carga_min, round(carga_por_prof)))
-                                restante -= carga
-                            cargas.append(max(1, carga))
+                                # Ajustar para o mínimo se necessário
+                                if REGRA_CARGA_HORARIA["permitir_menor_se_necessario"]:
+                                    carga_ajustada = max(1, min(carga, qtd_aulas))
+                                    cargas_validas.append(carga_ajustada)
+                        
+                        # Se não gerou cargas válidas, usar distribuição simples respeitando limites
+                        if not cargas_validas:
+                            carga_max = REGRA_CARGA_HORARIA["maximo_aulas"]
+                            carga_min = REGRA_CARGA_HORARIA["minimo_aulas"]
+                            if qtd_aulas <= carga_max:
+                                cargas_validas = [qtd_aulas]
+                            else:
+                                # Dividir respeitando limites
+                                num_profs = math.ceil(qtd_aulas / carga_max)
+                                carga_por_prof = qtd_aulas / num_profs
+                                cargas_validas = []
+                                restante = qtd_aulas
+                                for i in range(num_profs):
+                                    if i == num_profs - 1:
+                                        carga = restante
+                                    else:
+                                        carga = min(carga_max, max(carga_min, round(carga_por_prof)))
+                                        restante -= carga
+                                    cargas_validas.append(max(1, carga))
+                        
+                        cargas = cargas_validas
                         
                         # Criar os professores
                         escolas_regiao = list(set(dt[dt['REGIÃO'] == reg]['ESCOLA'].unique()))
@@ -857,6 +2351,9 @@ with t6:
                             if carga > 0:
                                 cod = gerar_codigo_padrao(proximo_numero, "DT", reg, mat)
                                 proximo_numero += 1
+                                
+                                # REGRA 5: Calcular PL baseado na LDB (1/3)
+                                pl_ldb = calcular_pl_ldb(carga)
                                 
                                 novos_profs.append({
                                     "CÓDIGO": cod,
@@ -867,7 +2364,7 @@ with t6:
                                     "VÍNCULO": "DT",
                                     "TURNO_FIXO": "",
                                     "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]),
-                                    "QTD_PL": 0
+                                    "QTD_PL": pl_ldb  # PL calculado pela LDB
                                 })
                                 
                                 status.write(f"  ✅ {cod}: {carga}h ({mat} - {reg})")
@@ -875,10 +2372,12 @@ with t6:
                     # Adicionar novos professores ao dataframe
                     if novos_profs:
                         dp_com_novos = pd.concat([dp, pd.DataFrame(novos_profs)], ignore_index=True)
+                        status.write(f"✅ {len(novos_profs)} novos professores consolidados criados")
                     else:
                         dp_com_novos = dp
                 else:
                     dp_com_novos = dp
+                    status.write("✅ Todas as vagas foram preenchidas!")
                 
                 df_horario = pd.DataFrame(novos_horarios, columns=COLS_PADRAO["Horario"])
                 
@@ -887,10 +2386,11 @@ with t6:
                 
                 status.update(label="✅ Grade Gerada com Sucesso!", state="complete", expanded=False)
                 st.success(f"Processamento concluído! {escolas_processadas} escolas processadas.")
+    else:
+        st.warning("⚠️ Configure a conexão com Google Sheets primeiro.")
 
-
-# 7. VER HORÁRIO
-with t7:
+# ABA 8: VER HORÁRIO (MANTENHA O MESMO CÓDIGO)
+with t8:
     if dh.empty: 
         st.info("✨ Nenhum horário gerado ainda. Vá na aba '🚀 Gerador' para criar a primeira grade da rede.")
     else:
@@ -958,7 +2458,7 @@ with t7:
                 
                 df_esc = df_view[df_view['ESCOLA'] == escola]
                 
-                for dia in ["SEGUNDA-FEIRA", "TERÇA-FEIRA", "QUARTA-FEIRA", "QUINTA-FEIRA", "SEXTA-FEIRA"]:
+                for dia in DIAS_SEMANA:
                     df_dia = df_esc[df_esc['DIA'] == dia]
                     if df_dia.empty: continue
                     

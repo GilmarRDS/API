@@ -1,5 +1,14 @@
-streamlit
-st-gsheets-connection
-pandas
-xlsxwriter
-plotly
+# streamlit
+# st-gsheets-connection
+# pandas
+# xlsxwriter
+# plotly
+streamlit==1.29.0
+pandas==2.1.4
+gspread==5.12.0
+google-auth==2.23.4
+google-auth-oauthlib==1.1.0
+google-auth-httplib2==0.1.1
+google-api-python-client==2.104.0
+xlsxwriter==3.1.9
+plotly==5.16.1
