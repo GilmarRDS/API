@@ -2267,11 +2267,11 @@ with t8:
                 st.markdown("---")
                 # ==========================================
 # ==========================================
-# ABA 9: EDITOR MANUAL (COM VALIDAÇÃO DE REGIÃO)
+# ABA 9: EDITOR MANUAL (COM FILTRO DE DIAS DE AULA)
 # ==========================================
 with t9:
     st.markdown("### ✏️ Montagem Manual de Horário")
-    st.info("Selecione os filtros abaixo. O sistema valida **Horários** e **Regiões** ao salvar.")
+    st.info("O sistema mostrará apenas as turmas que têm aula de especialista no dia selecionado (baseado na aba '⚙️ Config').")
 
     if dt.empty:
         st.warning("⚠️ Você precisa cadastrar TURMAS na aba '🏫 Turmas' antes de montar o horário.")
@@ -2300,136 +2300,157 @@ with t9:
             st.divider()
             st.markdown(f"#### 📝 Editando: {esc_man} | {dia_man} | {turno_man}")
             
-            # Identificar Região da Escola Atual
+            # Identificar Região da Escola
             regiao_escola = dt[dt['ESCOLA'] == esc_man].iloc[0]['REGIÃO']
             st.caption(f"📍 Região da Escola: **{regiao_escola}**")
 
-            # A. Identificar as turmas deste turno
-            turmas_alvo = sorted(dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]['TURMA'].unique())
+            # --- A. LÓGICA DE FILTRAGEM DE TURMAS (NOVO!) ---
+            # 1. Pegar todas as turmas dessa escola/turno
+            df_turmas_base = dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]
             
-            # B. Buscar dados existentes
-            if not dh.empty:
-                mask_existente = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
-                df_recorte = dh[mask_existente].copy()
+            turmas_filtradas = []
+            
+            # 2. Verificar no ConfigDias se a turma deve aparecer HOJE
+            for _, row in df_turmas_base.iterrows():
+                serie = row['SÉRIE/ANO']
+                turma_nome = row['TURMA']
+                
+                # Buscar configuração dessa série
+                config_serie = dd[dd['SÉRIE/ANO'] == serie]
+                
+                if not config_serie.empty:
+                    # Se tem configuração, verificamos se o dia bate
+                    dias_permitidos = config_serie['DIA_PLANEJAMENTO'].unique()
+                    if dia_man in dias_permitidos:
+                        turmas_filtradas.append(turma_nome)
+                else:
+                    # Se NÃO tem configuração (ex: esqueceu de configurar), mostramos a turma por segurança
+                    turmas_filtradas.append(turma_nome)
+            
+            turmas_alvo = sorted(list(set(turmas_filtradas)))
+            
+            if not turmas_alvo:
+                st.info(f"🚫 Nenhuma turma desta escola tem aula configurada para **{dia_man}** na aba Config.")
             else:
-                df_recorte = pd.DataFrame()
+                # --- B. Buscar dados existentes ---
+                if not dh.empty:
+                    mask_existente = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
+                    # Filtramos também para trazer apenas as turmas alvo
+                    df_recorte = dh[mask_existente & dh['TURMA'].isin(turmas_alvo)].copy()
+                else:
+                    df_recorte = pd.DataFrame()
 
-            # C. Esqueleto Completo
-            esqueleto = pd.DataFrame({
-                'ESCOLA': [esc_man] * len(turmas_alvo),
-                'TURMA': turmas_alvo,
-                'TURNO': [turno_man] * len(turmas_alvo),
-                'DIA': [dia_man] * len(turmas_alvo),
-                '1ª': ["---"] * len(turmas_alvo),
-                '2ª': ["---"] * len(turmas_alvo),
-                '3ª': ["---"] * len(turmas_alvo),
-                '4ª': ["---"] * len(turmas_alvo),
-                '5ª': ["---"] * len(turmas_alvo)
-            })
+                # --- C. Esqueleto Completo (Apenas turmas do dia) ---
+                esqueleto = pd.DataFrame({
+                    'ESCOLA': [esc_man] * len(turmas_alvo),
+                    'TURMA': turmas_alvo,
+                    'TURNO': [turno_man] * len(turmas_alvo),
+                    'DIA': [dia_man] * len(turmas_alvo),
+                    '1ª': ["---"] * len(turmas_alvo),
+                    '2ª': ["---"] * len(turmas_alvo),
+                    '3ª': ["---"] * len(turmas_alvo),
+                    '4ª': ["---"] * len(turmas_alvo),
+                    '5ª': ["---"] * len(turmas_alvo)
+                })
 
-            if not df_recorte.empty:
-                esqueleto = esqueleto[~esqueleto['TURMA'].isin(df_recorte['TURMA'])]
-                df_final_editor = pd.concat([df_recorte, esqueleto], ignore_index=True)
-            else:
-                df_final_editor = esqueleto
+                if not df_recorte.empty:
+                    esqueleto = esqueleto[~esqueleto['TURMA'].isin(df_recorte['TURMA'])]
+                    df_final_editor = pd.concat([df_recorte, esqueleto], ignore_index=True)
+                else:
+                    df_final_editor = esqueleto
 
-            df_final_editor = df_final_editor.sort_values('TURMA').reset_index(drop=True)
+                df_final_editor = df_final_editor.sort_values('TURMA').reset_index(drop=True)
 
-            # D. Configurar Editor
-            lista_profs = ["---"] + sorted(dp['CÓDIGO'].unique().tolist())
-            
-            col_config = {
-                "ESCOLA": None, "TURNO": None, "DIA": None,
-                "TURMA": st.column_config.TextColumn("Turma", disabled=True, width="small"),
-                "1ª": st.column_config.SelectboxColumn("1ª Aula", options=lista_profs, width="medium", required=True),
-                "2ª": st.column_config.SelectboxColumn("2ª Aula", options=lista_profs, width="medium", required=True),
-                "3ª": st.column_config.SelectboxColumn("3ª Aula", options=lista_profs, width="medium", required=True),
-                "4ª": st.column_config.SelectboxColumn("4ª Aula", options=lista_profs, width="medium", required=True),
-                "5ª": st.column_config.SelectboxColumn("5ª Aula", options=lista_profs, width="medium", required=True),
-            }
+                # --- D. Configurar Editor ---
+                lista_profs = ["---"] + sorted(dp['CÓDIGO'].unique().tolist())
+                
+                col_config = {
+                    "ESCOLA": None, "TURNO": None, "DIA": None,
+                    "TURMA": st.column_config.TextColumn("Turma", disabled=True, width="small"),
+                    "1ª": st.column_config.SelectboxColumn("1ª Aula", options=lista_profs, width="medium", required=True),
+                    "2ª": st.column_config.SelectboxColumn("2ª Aula", options=lista_profs, width="medium", required=True),
+                    "3ª": st.column_config.SelectboxColumn("3ª Aula", options=lista_profs, width="medium", required=True),
+                    "4ª": st.column_config.SelectboxColumn("4ª Aula", options=lista_profs, width="medium", required=True),
+                    "5ª": st.column_config.SelectboxColumn("5ª Aula", options=lista_profs, width="medium", required=True),
+                }
 
-            df_editado = st.data_editor(
-                df_final_editor,
-                column_config=col_config,
-                hide_index=True,
-                use_container_width=True,
-                key=f"editor_{esc_man}_{dia_man}_{turno_man}",
-                num_rows="fixed"
-            )
+                df_editado = st.data_editor(
+                    df_final_editor,
+                    column_config=col_config,
+                    hide_index=True,
+                    use_container_width=True,
+                    key=f"editor_{esc_man}_{dia_man}_{turno_man}",
+                    num_rows="fixed"
+                )
 
-            # --- 3. BOTÃO DE SALVAR COM VALIDAÇÃO TRIPLA ---
-            st.write("")
-            col_btn, col_info = st.columns([1, 2])
-            
-            with col_btn:
-                salvar = st.button("💾 Validar e Salvar Grade", type="primary", use_container_width=True)
-            
-            with col_info:
-                if salvar:
-                    if not sistema_seguro:
-                        st.error("Sem conexão segura com Google Sheets.")
-                    else:
-                        conflitos = []
-                        with st.spinner("🔍 Validando Regras (Horário e Região)..."):
-                            
-                            # Preparar dados para verificação de horário
-                            if not dh.empty:
-                                mask_atual = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
-                                df_resto_rede = dh[~mask_atual].copy()
-                                df_conflito_horario = df_resto_rede[df_resto_rede['DIA'] == dia_man]
-                            else:
-                                df_conflito_horario = pd.DataFrame()
-
-                            slots = ['1ª', '2ª', '3ª', '4ª', '5ª']
-
-                            for idx, row in df_editado.iterrows():
-                                turma_atual = row['TURMA']
-                                for slot in slots:
-                                    prof = row[slot]
-                                    if prof == "---" or not prof: continue
-
-                                    # 1. VALIDAÇÃO DE REGIÃO (NOVO!)
-                                    # Buscar região do professor
-                                    dados_prof = dp[dp['CÓDIGO'] == prof]
-                                    if not dados_prof.empty:
-                                        regiao_prof = dados_prof.iloc[0]['REGIÃO']
-                                        
-                                        # Lógica de Compatibilidade
-                                        # Região Exata OU (Fundão <=> Timbuí)
-                                        compativel = False
-                                        if regiao_prof == regiao_escola:
-                                            compativel = True
-                                        elif (regiao_prof in ["FUNDÃO", "TIMBUÍ"]) and (regiao_escola in ["FUNDÃO", "TIMBUÍ"]):
-                                            compativel = True
-                                        
-                                        if not compativel:
-                                            conflitos.append(f"🌍 **Erro de Região:** O professor **{prof}** é de **{regiao_prof}** e não pode dar aula nesta escola de **{regiao_escola}**.")
-
-                                    # 2. Conflito Interno
-                                    qtd_uso = df_editado[df_editado[slot] == prof].shape[0]
-                                    if qtd_uso > 1:
-                                        conflitos.append(f"❌ **Conflito Interno:** {prof} alocado em {qtd_uso} turmas na {slot} aula.")
-
-                                    # 3. Conflito Externo
-                                    if not df_conflito_horario.empty:
-                                        ocupacao = df_conflito_horario[df_conflito_horario[slot] == prof]
-                                        for _, c in ocupacao.iterrows():
-                                            conflitos.append(f"⛔ **Conflito Externo:** {prof} já está na escola **{c['ESCOLA']}** ({c['TURMA']}) na {slot} aula.")
-
-                        if conflitos:
-                            st.error(f"Foram encontrados {len(set(conflitos))} erros! Não foi salvo.")
-                            for c in sorted(list(set(conflitos))): st.write(c)
+                # --- 3. BOTÃO DE SALVAR ---
+                st.write("")
+                col_btn, col_info = st.columns([1, 2])
+                
+                with col_btn:
+                    salvar = st.button("💾 Validar e Salvar Grade", type="primary", use_container_width=True)
+                
+                with col_info:
+                    if salvar:
+                        if not sistema_seguro:
+                            st.error("Sem conexão segura com Google Sheets.")
                         else:
-                            with st.spinner("☁️ Enviando para nuvem..."):
+                            conflitos = []
+                            with st.spinner("🔍 Validando Regras..."):
+                                
+                                # Preparar dados para validação de horário
                                 if not dh.empty:
                                     mask_atual = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
-                                    dh = dh[~mask_atual]
-                                
-                                dh = pd.concat([dh, df_editado], ignore_index=True)
-                                salvar_seguro(dt, dc, dp, dd, da, dh)
-                                st.success("✅ Horário atualizado com sucesso!")
-                                time.sleep(1)
-                                st.rerun()
+                                    df_resto_rede = dh[~mask_atual].copy()
+                                    df_conflito_horario = df_resto_rede[df_resto_rede['DIA'] == dia_man]
+                                else:
+                                    df_conflito_horario = pd.DataFrame()
+
+                                slots = ['1ª', '2ª', '3ª', '4ª', '5ª']
+
+                                for idx, row in df_editado.iterrows():
+                                    turma_atual = row['TURMA']
+                                    for slot in slots:
+                                        prof = row[slot]
+                                        if prof == "---" or not prof: continue
+
+                                        # 1. Região
+                                        dados_prof = dp[dp['CÓDIGO'] == prof]
+                                        if not dados_prof.empty:
+                                            regiao_prof = dados_prof.iloc[0]['REGIÃO']
+                                            compativel = False
+                                            if regiao_prof == regiao_escola: compativel = True
+                                            elif (regiao_prof in ["FUNDÃO", "TIMBUÍ"]) and (regiao_escola in ["FUNDÃO", "TIMBUÍ"]): compativel = True
+                                            
+                                            if not compativel:
+                                                conflitos.append(f"🌍 **Erro de Região:** {prof} ({regiao_prof}) na escola de {regiao_escola}.")
+
+                                        # 2. Conflito Interno
+                                        if df_editado[df_editado[slot] == prof].shape[0] > 1:
+                                            conflitos.append(f"❌ **Conflito Interno:** {prof} duplicado na {slot} aula.")
+
+                                        # 3. Conflito Externo
+                                        if not df_conflito_horario.empty:
+                                            ocupacao = df_conflito_horario[df_conflito_horario[slot] == prof]
+                                            for _, c in ocupacao.iterrows():
+                                                conflitos.append(f"⛔ **Já trabalha:** {prof} está na {c['ESCOLA']} ({c['TURMA']}) na {slot} aula.")
+
+                            if conflitos:
+                                st.error(f"Erros encontrados: {len(set(conflitos))}")
+                                for c in sorted(list(set(conflitos))): st.write(c)
+                            else:
+                                with st.spinner("☁️ Salvando..."):
+                                    if not dh.empty:
+                                        # Remove APENAS as turmas que estamos editando deste dia
+                                        # (Mantém outras turmas da mesma escola se elas não apareceram na lista por causa do filtro)
+                                        mask_atual = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man) & (dh['TURMA'].isin(turmas_alvo))
+                                        dh = dh[~mask_atual]
+                                    
+                                    dh = pd.concat([dh, df_editado], ignore_index=True)
+                                    salvar_seguro(dt, dc, dp, dd, da, dh)
+                                    st.success("✅ Salvo!")
+                                    time.sleep(1)
+                                    st.rerun()
 
             with st.expander("🕵️‍♀️ Ver Lista de Professores"):
                 st.dataframe(dp[['CÓDIGO', 'NOME', 'COMPONENTES', 'REGIÃO']], use_container_width=True, hide_index=True)
