@@ -497,44 +497,43 @@ if gs_client is None or not PLANILHA_ID:
 # ==========================================
 # 7. FUNÇÕES DE LEITURA/ESCRITA
 # ==========================================
+
 def ler_aba_gsheets(aba_nome: str, colunas_esperadas: List[str]) -> Tuple[pd.DataFrame, bool]:
     """
     Lê uma aba do Google Sheets e retorna um DataFrame padronizado.
-    Implementa rate limiting e retry com backoff exponencial para evitar quota exceeded.
-    
-    Args:
-        aba_nome: Nome da aba a ser lida
-        colunas_esperadas: Lista de colunas esperadas no DataFrame
-        
-    Returns:
-        tuple: (DataFrame, sucesso) onde sucesso é True se a leitura foi bem-sucedida
+    Versão BLINDADA: Usa get_all_values para evitar erro 'list index out of range' em abas vazias.
     """
     max_retries = 5
-    base_delay = 2  # Segundos base para backoff exponencial
+    base_delay = 2
     
     for tentativa in range(max_retries):
         try:
             if gs_client is None or not PLANILHA_ID:
-                st.warning(f"⚠️ Conexão não disponível para ler aba '{aba_nome}'")
                 return pd.DataFrame(columns=colunas_esperadas), False
 
-            # Rate limiting: delay entre requisições
+            # Rate limiting
             if tentativa > 0:
-                delay = base_delay * (2 ** tentativa)  # Backoff exponencial: 2s, 4s, 8s, 16s, 32s
-                time.sleep(delay)
+                time.sleep(base_delay * (2 ** tentativa))
 
-            # Abrir planilha
             spreadsheet = gs_client.open_by_key(PLANILHA_ID)
             worksheet = spreadsheet.worksheet(aba_nome)
 
-            # Obter todos os dados
-            data = worksheet.get_all_records()
-            df = pd.DataFrame(data)
+            # --- MUDANÇA PRINCIPAL AQUI ---
+            # get_all_values() retorna uma lista de listas (crua), o que não dá erro se estiver vazia
+            dados_brutos = worksheet.get_all_values()
             
-            if df.empty:
+            # Se a lista estiver vazia ou tiver apenas cabeçalho
+            if not dados_brutos:
                 return pd.DataFrame(columns=colunas_esperadas), True
-                
-            # Padronizar nomes das colunas
+            
+            # A primeira linha é o cabeçalho
+            headers = dados_brutos.pop(0)
+            
+            # Cria o DataFrame
+            df = pd.DataFrame(dados_brutos, columns=headers)
+            # ------------------------------
+            
+            # Padronizar nomes das colunas para maiúsculas/sem acento
             df.columns = [padronizar(c) for c in df.columns]
             
             # Garantir que temos todas as colunas esperadas
@@ -543,7 +542,7 @@ def ler_aba_gsheets(aba_nome: str, colunas_esperadas: List[str]) -> Tuple[pd.Dat
                 if col_norm not in df.columns:
                     df[col_norm] = ""
             
-            # Renomear para os nomes padrão
+            # Renomear para os nomes bonitos (originais)
             rename_dict = {}
             for col in colunas_esperadas:
                 col_norm = padronizar(col)
@@ -553,59 +552,44 @@ def ler_aba_gsheets(aba_nome: str, colunas_esperadas: List[str]) -> Tuple[pd.Dat
             if rename_dict:
                 df = df.rename(columns=rename_dict)
             
-            # Manter apenas as colunas esperadas (na ordem correta)
+            # Manter apenas as colunas esperadas na ordem certa
             df = df[colunas_esperadas].copy()
             
-            # Limpar e converter dados
+            # Limpeza final
             df = df.fillna("")
             for c in df.columns:
-                if c in ["QTD_AULAS", "CARGA_HORÁRIA", "QTD_PL"]:
+                if c in ["QTD_AULAS", "CARGA_HORÁRIA", "QTD_PL", "HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"]:
+                    # Converte para número, força 0 se der erro
                     df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
                 else:
                     df[c] = df[c].astype(str).apply(padronizar)
                     
             return df, True
             
-        except gspread.exceptions.APIError as e:
-            # Verificar se é erro de quota exceeded
-            error_str = str(e).lower()
-            is_quota_error = '429' in error_str or 'quota exceeded' in error_str or 'rate limit' in error_str
-
-            if is_quota_error:
-                if tentativa < max_retries - 1:
-                    delay = base_delay * (2 ** tentativa)
-                    if tentativa == 0:  # Primeira tentativa, avisar usuário
-                        st.warning(f"⏳ Quota da API excedida ao ler '{aba_nome}'. Aguardando {delay}s antes de tentar novamente...")
-                    time.sleep(delay)
-                    continue
-                else:
-                    st.error(f"❌ Erro ao ler aba '{aba_nome}': Quota da API excedida após {max_retries} tentativas.")
-                    st.info("💡 **Soluções:**\n"
-                            "1. Aguarde alguns minutos antes de tentar novamente\n"
-                            "2. O cache está configurado para 5 minutos - aguarde o próximo carregamento automático\n"
-                            "3. Evite recarregar a página frequentemente\n"
-                            "4. Use o botão 'Limpar Cache' apenas quando necessário")
-                    return pd.DataFrame(columns=colunas_esperadas), False
-            else:
-                # Outro erro da API
-                st.error(f"❌ Erro ao ler aba '{aba_nome}': {e}")
-                return pd.DataFrame(columns=colunas_esperadas), False
-                
         except gspread.exceptions.WorksheetNotFound:
-            st.warning(f"⚠️ Aba '{aba_nome}' não encontrada na planilha")
+            # Se a aba não existe, retornamos DataFrame vazio mas com status True (para o sistema criar depois)
+            return pd.DataFrame(columns=colunas_esperadas), False
+            
+        except gspread.exceptions.APIError as e:
+            error_str = str(e).lower()
+            if '429' in error_str or 'quota exceeded' in error_str:
+                if tentativa < max_retries - 1:
+                    continue
+            st.error(f"❌ Erro API ao ler '{aba_nome}': {e}")
             return pd.DataFrame(columns=colunas_esperadas), False
             
         except Exception as e:
+            # Se for erro de índice (aba vazia), retornamos vazio sem alarde
+            if "list index out of range" in str(e):
+                return pd.DataFrame(columns=colunas_esperadas), True
+                
             if tentativa < max_retries - 1:
-                delay = base_delay * (2 ** tentativa)
-                time.sleep(delay)
                 continue
-            else:
-                st.error(f"❌ Erro ao ler aba '{aba_nome}': {e}")
-                return pd.DataFrame(columns=colunas_esperadas), False
+            st.error(f"❌ Erro ao ler aba '{aba_nome}': {e}")
+            return pd.DataFrame(columns=colunas_esperadas), False
     
-    # Se chegou aqui, todas as tentativas falharam
     return pd.DataFrame(columns=colunas_esperadas), False
+
 
 def escrever_aba_gsheets(aba_nome: str, df: pd.DataFrame) -> bool:
     """
