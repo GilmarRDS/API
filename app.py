@@ -2170,7 +2170,7 @@ with t7:
         st.warning("⚠️ Configure a conexão com Google Sheets primeiro.")
 
 # ==========================================
-# ABA 8: VER HORÁRIO (VISUAL DE CARTÕES CORRIGIDO)
+# ABA 8: VER HORÁRIO (COMPLETO: CARDS + FILTRO DIA + NOVAS OPÇÕES)
 # ==========================================
 with t8:
     if dh.empty: 
@@ -2184,8 +2184,15 @@ with t8:
             map_nome = dict(zip(dp['CÓDIGO'], dp['NOME']))
             map_comp = dict(zip(dp['CÓDIGO'], dp['COMPONENTES']))
             
-            # Opções de visualização
-            opcoes_vis = ["Apenas Código", "Nome do Professor", "Matéria/Componente", "Nome + Matéria", "Código + Nome"]
+            # Opções de visualização (AGORA COM CÓDIGO + COMPONENTE)
+            opcoes_vis = [
+                "Apenas Código", 
+                "Nome do Professor", 
+                "Matéria/Componente", 
+                "Nome + Matéria", 
+                "Código + Nome",
+                "Código + Componente" # <--- NOVA OPÇÃO SOLICITADA
+            ]
             modo_vis = st.radio("Exibir:", opcoes_vis, horizontal=True)
             
             # Função para formatar o texto
@@ -2199,6 +2206,7 @@ with t8:
                 if modo_vis == "Matéria/Componente": return mat
                 if modo_vis == "Nome + Matéria": return f"{nome} ({mat})"
                 if modo_vis == "Código + Nome": return f"{codigo} - {nome}"
+                if modo_vis == "Código + Componente": return f"{codigo} ({mat})" # <--- LÓGICA NOVA
                 return codigo
 
         st.divider()
@@ -2211,7 +2219,7 @@ with t8:
             dia_sel = st.selectbox("📆 Dia", ["Todos os Dias"] + sorted(dh['DIA'].unique().tolist()), key="view_dia_card")
 
         # --- 3. EXIBIÇÃO EM CARTÕES ---
-        # CSS (Mantido)
+        # CSS para os cartões
         st.markdown("""
         <style>
         .turma-card-view {
@@ -2267,24 +2275,48 @@ with t8:
                 df_dia = df_view[df_view['DIA'] == dia]
                 if df_dia.empty: continue
                 
+                # --- FILTRO INTELIGENTE DE DIAS ---
+                # Verifica quais turmas realmente têm aula neste dia (pela aba Config)
+                turmas_no_dia = df_dia['TURMA'].unique()
+                turmas_validas_dia = []
+                
+                for t in turmas_no_dia:
+                    dados_t = dt[dt['TURMA'] == t]
+                    if not dados_t.empty:
+                        serie = dados_t.iloc[0]['SÉRIE/ANO']
+                        config = dd[dd['SÉRIE/ANO'] == serie]
+                        if not config.empty:
+                            if dia in config['DIA_PLANEJAMENTO'].unique():
+                                turmas_validas_dia.append(t)
+                        else:
+                            turmas_validas_dia.append(t) # Aceita se não tiver config
+                    else:
+                        turmas_validas_dia.append(t)
+                
+                if not turmas_validas_dia:
+                    continue # Se nenhuma turma tem aula hoje, pula o dia
+                
                 st.markdown(f"#### 📅 {dia}")
                 
                 # Loop pelos Turnos
                 for turno in sorted(df_dia['TURNO'].unique()):
-                    st.caption(f"☀️ {turno}")
                     
                     df_turno = df_dia[df_dia['TURNO'] == turno]
-                    turmas = sorted(df_turno['TURMA'].unique())
+                    # Filtra turmas do turno que também são válidas para o dia
+                    todas_turmas = sorted(df_turno['TURMA'].unique())
+                    turmas_finais = [t for t in todas_turmas if t in turmas_validas_dia]
+                    
+                    if not turmas_finais: continue
+
+                    st.caption(f"☀️ {turno}")
                     
                     # Criar Grid de 3 Colunas
                     cols = st.columns(3)
                     
-                    for i, turma in enumerate(turmas):
+                    for i, turma in enumerate(turmas_finais):
                         linha_turma = df_turno[df_turno['TURMA'] == turma].iloc[0]
                         
                         with cols[i % 3]:
-                            # --- CORREÇÃO AQUI: HTML SEM INDENTAÇÃO ---
-                            # As strings HTML devem estar encostadas na esquerda para não serem lidas como código
                             html_card = f"""
 <div class="turma-card-view">
 <div class="turma-title-view">👥 {turma}</div>
