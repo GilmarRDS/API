@@ -1289,7 +1289,17 @@ if gs_client is None or not PLANILHA_ID:
     st.stop()
 
 # Criar abas
-t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(["📊 Dashboard", "⚙️ Config", "📍 Rotas", "🏫 Turmas", "👨‍🏫 Professores", "💼 Vagas", "🚀 Gerador", "📅 Ver Horário"])
+t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
+    "📊 Dashboard", 
+    "⚙️ Config", 
+    "📍 Rotas", 
+    "🏫 Turmas", 
+    "👨‍🏫 Professores", 
+    "💼 Vagas", 
+    "🚀 Gerador", 
+    "📅 Ver Horário", 
+    "✏️ Editor Manual"  
+])
 
 # ==========================================
 # RESTANTE DO CÓDIGO DAS ABAS (MANTENHA O MESMO)
@@ -2271,3 +2281,147 @@ with t8:
                                 
                                 st.table(style_grade(df_final))
                 st.markdown("---")
+                # ==========================================
+# ABA 9: EDITOR MANUAL DE HORÁRIO (COM VALIDAÇÃO)
+# ==========================================
+with t9:
+    st.markdown("### ✏️ Ajuste Manual Fino")
+    st.info("Aqui você pode alterar qualquer aula manualmente. O sistema impedirá que você salve conflitos (mesmo professor em duas escolas).")
+
+    if dh.empty:
+        st.warning("⚠️ Gere um horário primeiro na aba '🚀 Gerador' para poder editá-lo.")
+    else:
+        # 1. Filtros para isolar o pedaço do horário
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            escolas_disp = sorted(dh['ESCOLA'].unique())
+            esc_man = st.selectbox("🏢 Escola", escolas_disp, key="man_esc")
+        
+        with c2:
+            dias_disp = sorted(dh['DIA'].unique(), key=lambda x: DIAS_SEMANA.index(x) if x in DIAS_SEMANA else 99)
+            dia_man = st.selectbox("📅 Dia", dias_disp, key="man_dia")
+            
+        with c3:
+            turnos_disp = dh[(dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man)]['TURNO'].unique()
+            if len(turnos_disp) > 0:
+                turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="man_turno")
+            else:
+                turno_man = None
+                st.warning("Sem turmas neste dia.")
+
+        if turno_man:
+            st.markdown("---")
+            
+            # 2. Preparar dados para edição
+            mask = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
+            df_recorte = dh[mask].copy()
+            df_recorte = df_recorte.sort_values('TURMA')
+
+            # 3. Preparar lista de opções
+            lista_profs = ["---"] + sorted(dp['CÓDIGO'].unique().tolist())
+
+            # 4. Configurar a Tabela Editável
+            col_config = {
+                "ESCOLA": st.column_config.TextColumn(disabled=True),
+                "TURMA": st.column_config.TextColumn(disabled=True),
+                "TURNO": st.column_config.TextColumn(disabled=True),
+                "DIA": st.column_config.TextColumn(disabled=True),
+                "1ª": st.column_config.SelectboxColumn("1ª Aula", options=lista_profs, width="medium"),
+                "2ª": st.column_config.SelectboxColumn("2ª Aula", options=lista_profs, width="medium"),
+                "3ª": st.column_config.SelectboxColumn("3ª Aula", options=lista_profs, width="medium"),
+                "4ª": st.column_config.SelectboxColumn("4ª Aula", options=lista_profs, width="medium"),
+                "5ª": st.column_config.SelectboxColumn("5ª Aula", options=lista_profs, width="medium"),
+            }
+
+            st.caption("👇 Clique nas células abaixo para trocar o professor:")
+            df_editado = st.data_editor(
+                df_recorte,
+                column_config=col_config,
+                hide_index=True,
+                use_container_width=True,
+                key="editor_manual_grade"
+            )
+
+            # 6. Botão de Salvar com VALIDAÇÃO INTELIGENTE
+            st.markdown("###")
+            if st.button("💾 Validar e Salvar Alterações", type="primary", use_container_width=True):
+                if sistema_seguro:
+                    conflitos_encontrados = []
+                    
+                    # --- LÓGICA DE VALIDAÇÃO DE CONFLITOS ---
+                    with st.spinner("Verificando se os professores já trabalham em outras escolas..."):
+                        
+                        # 1. Pegar o "Resto do Mundo" (Todos os horários EXCETO o que estamos editando agora)
+                        # Isso serve para comparar se o professor está em outra escola neste mesmo dia/turno
+                        mask_outros = ~mask # Inverso da máscara atual
+                        df_resto = dh[mask_outros].copy()
+                        
+                        # Filtrar apenas o dia atual no resto do mundo para agilizar
+                        df_resto_dia = df_resto[df_resto['DIA'] == dia_man]
+
+                        # 2. Verificar cada célula editada
+                        colunas_slots = ['1ª', '2ª', '3ª', '4ª', '5ª']
+                        
+                        for idx, row in df_editado.iterrows():
+                            turma_atual = row['TURMA']
+                            
+                            for slot in colunas_slots:
+                                prof_codigo = row[slot]
+                                
+                                # Ignora slots vazios
+                                if prof_codigo == "---" or not prof_codigo:
+                                    continue
+                                
+                                # A. Verificar conflito no PRÓPRIO editor (ex: mesmo prof em 2 turmas ao mesmo tempo na edição atual)
+                                # Conta quantas vezes esse professor aparece na coluna 'slot' deste dataframe editado
+                                contagem_interna = df_editado[df_editado[slot] == prof_codigo].shape[0]
+                                if contagem_interna > 1:
+                                    conflitos_encontrados.append(f"❌ <b>CONFLITO INTERNO:</b> O professor <code>{prof_codigo}</code> foi colocado em mais de uma turma na <b>{slot} aula</b> nesta mesma escola.")
+
+                                # B. Verificar conflito com OUTRAS ESCOLAS (Resto do Mundo)
+                                # Procura se esse professor está ocupado nesse slot em outro lugar
+                                conflito_externo = df_resto_dia[df_resto_dia[slot] == prof_codigo]
+                                
+                                if not conflito_externo.empty:
+                                    for _, c_row in conflito_externo.iterrows():
+                                        conflitos_encontrados.append(
+                                            f"⛔ <b>CONFLITO EXTERNO:</b> O professor <code>{prof_codigo}</code> já está trabalhando na escola "
+                                            f"<b>{c_row['ESCOLA']}</b> (Turma {c_row['TURMA']}) na <b>{slot} aula</b>."
+                                        )
+
+                    # --- DECISÃO: SALVAR OU BLOQUEAR ---
+                    if conflitos_encontrados:
+                        # Remover duplicatas da lista de erros (caso o loop pegue 2x o mesmo erro)
+                        conflitos_unicos = list(set(conflitos_encontrados))
+                        
+                        st.error(f"⚠️ Foram encontrados {len(conflitos_unicos)} conflitos! O salvamento foi bloqueado.")
+                        for msg in conflitos_unicos:
+                            st.markdown(msg, unsafe_allow_html=True)
+                        st.warning("Corrija os erros acima na tabela e tente salvar novamente.")
+                        
+                    else:
+                        # Se não tem conflitos, SALVA
+                        with st.spinner("Salvando alterações..."):
+                            # Remove as linhas antigas
+                            indices_originais = dh[mask].index
+                            dh = dh.drop(indices_originais)
+                            
+                            # Adiciona as novas
+                            dh = pd.concat([dh, df_editado], ignore_index=True)
+                            
+                            # Salva no Google Sheets
+                            salvar_seguro(dt, dc, dp, dd, da, dh)
+                            
+                            st.success("✅ Horário validado e atualizado com sucesso!")
+                            time.sleep(1)
+                            st.rerun()
+                else:
+                    st.error("Sem conexão segura para salvar.")
+
+            # --- AJUDA VISUAL ---
+            with st.expander("🕵️‍♀️ Consultar Lista de Professores"):
+                st.dataframe(
+                    dp[['CÓDIGO', 'NOME', 'COMPONENTES', 'REGIÃO']], 
+                    use_container_width=True,
+                    hide_index=True
+                )
