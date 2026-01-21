@@ -36,6 +36,7 @@ TURNOS = ["MATUTINO", "VESPERTINO", "AMBOS"]
 # Vínculos de professores
 VINCULOS = ["DT", "EFETIVO"]
 
+
 # Colunas padrão esperadas em cada aba
 COLS_PADRAO = {
     "Turmas": ["ESCOLA", "NÍVEL", "TURMA", "TURNO", "SÉRIE/ANO", "REGIÃO"],
@@ -46,7 +47,8 @@ COLS_PADRAO = {
     ],
     "ConfigDias": ["SÉRIE/ANO", "DIA_PLANEJAMENTO"],
     "Agrupamentos": ["NOME_ROTA", "LISTA_ESCOLAS"],
-    "Horario": ["ESCOLA", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"]
+    "Horario": ["ESCOLA", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"],
+    "CH": ["HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"] # <--- NOVA ABA
 }
 
 # Configurações de carga horária padrão

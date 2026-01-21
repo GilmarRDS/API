@@ -4,7 +4,11 @@ Regras de Alocação de Professores - Sistema de Horários Escolares
 Este arquivo contém todas as regras que o sistema deve seguir ao alocar professores.
 """
 
-from config import REGIOES
+from ch import obter_pl_exato
+
+
+
+
 
 # ==========================================
 # REGRA 1: CONFLITOS DE HORÁRIO
@@ -177,36 +181,61 @@ def verificar_janelas(ocupacao_professor: dict, novo_slot: int, escola: str, rot
 # ==========================================
 # REGRA 5: LDB - CÁLCULO DE PL (PLANEJAMENTO)
 # ==========================================
+# REGRA_LDB = {
+#     "descricao": "Seguir LDB: 1/3 de PL para cada carga de aulas",
+#     "tipo": "obrigatoria",
+#     "aplicar": True,
+#     "proporcao_pl": 1/3,  # 1/3 de PL para cada carga
+#     "formula": "PL = AULAS / 3"  # Exemplo: 20 aulas = 6.67 PL (arredondado para 7)
+# }
+
+# def calcular_pl_ldb(carga_aulas: int) -> int:
+#     """
+#     Calcula o PL (Planejamento) baseado na LDB (1/3 da carga).
+    
+#     Args:
+#         carga_aulas: Carga horária de aulas
+        
+#     Returns:
+#         int: Quantidade de PL arredondada
+#     """
+#     pl = carga_aulas * REGRA_LDB["proporcao_pl"]
+#     return max(1, round(pl))  # Mínimo 1 PL
+
+# def calcular_carga_total(carga_aulas: int) -> int:
+#     """
+#     Calcula a carga total (aulas + PL) baseado na LDB.
+    
+#     Args:
+#         carga_aulas: Carga horária de aulas
+        
+#     Returns:
+#         int: Carga total (aulas + PL)
+#     """
+#     pl = calcular_pl_ldb(carga_aulas)
+#     return carga_aulas + pl
+
+
+# ==========================================
+# REGRA 5: LDB - CÁLCULO DE PL (ATUALIZADO)
+# ==========================================
 REGRA_LDB = {
-    "descricao": "Seguir LDB: 1/3 de PL para cada carga de aulas",
+    "descricao": "Seguir Tabela Municipal (Lei 1.071/2017)",
     "tipo": "obrigatoria",
     "aplicar": True,
-    "proporcao_pl": 1/3,  # 1/3 de PL para cada carga
-    "formula": "PL = AULAS / 3"  # Exemplo: 20 aulas = 6.67 PL (arredondado para 7)
+    "origem": "ch.py"
 }
 
 def calcular_pl_ldb(carga_aulas: int) -> int:
     """
-    Calcula o PL (Planejamento) baseado na LDB (1/3 da carga).
-    
-    Args:
-        carga_aulas: Carga horária de aulas
-        
-    Returns:
-        int: Quantidade de PL arredondada
+    Calcula o PL baseado na tabela exata da Lei Municipal.
     """
-    pl = carga_aulas * REGRA_LDB["proporcao_pl"]
-    return max(1, round(pl))  # Mínimo 1 PL
+    return obter_pl_exato(carga_aulas)
 
+# --- COLE AQUI A FUNÇÃO QUE FALTAVA ---
 def calcular_carga_total(carga_aulas: int) -> int:
     """
-    Calcula a carga total (aulas + PL) baseado na LDB.
-    
-    Args:
-        carga_aulas: Carga horária de aulas
-        
-    Returns:
-        int: Carga total (aulas + PL)
+    Calcula a carga total (aulas + PL) somando as duas partes.
     """
     pl = calcular_pl_ldb(carga_aulas)
     return carga_aulas + pl

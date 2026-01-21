@@ -17,6 +17,9 @@ import copy
 import gspread
 from google.oauth2 import service_account
 from inteligencia import analisar_demanda_inteligente
+from inteligencia import gerar_novos_professores_inteligentes
+
+from ch import gerar_dataframe_ch
 
 # Importar configurações e utilitários
 from config import (
@@ -607,17 +610,10 @@ def ler_aba_gsheets(aba_nome: str, colunas_esperadas: List[str]) -> Tuple[pd.Dat
 def escrever_aba_gsheets(aba_nome: str, df: pd.DataFrame) -> bool:
     """
     Escreve dados em uma aba do Google Sheets.
-    Implementa rate limiting e retry com backoff exponencial para evitar quota exceeded.
-    
-    Args:
-        aba_nome: Nome da aba onde escrever
-        df: DataFrame com os dados a serem escritos
-        
-    Returns:
-        bool: True se a escrita foi bem-sucedida, False caso contrário
+    Versão corrigida: Permite salvar DataFrames vazios (apenas cabeçalho) sem erro.
     """
     max_retries = 5
-    base_delay = 2  # Segundos base para backoff exponencial
+    base_delay = 2
     
     for tentativa in range(max_retries):
         try:
@@ -625,67 +621,50 @@ def escrever_aba_gsheets(aba_nome: str, df: pd.DataFrame) -> bool:
                 st.error(f"❌ Conexão não disponível para escrever na aba '{aba_nome}'")
                 return False
             
-            if df.empty:
-                st.warning(f"⚠️ DataFrame vazio para aba '{aba_nome}'")
-                return False
-            
-            # Rate limiting: delay entre requisições
+            # Rate limiting
             if tentativa > 0:
-                delay = base_delay * (2 ** tentativa)  # Backoff exponencial
+                delay = base_delay * (2 ** tentativa)
                 time.sleep(delay)
             
             spreadsheet = gs_client.open_by_key(PLANILHA_ID)
             
-            # Verificar se a aba existe
+            # Verificar/Criar aba
             try:
                 worksheet = spreadsheet.worksheet(aba_nome)
             except gspread.exceptions.WorksheetNotFound:
-                # Criar nova aba se não existir
-                worksheet = spreadsheet.add_worksheet(
-                    title=aba_nome,
-                    rows=max(1000, len(df) + 100),
-                    cols=len(df.columns)
-                )
+                cols = len(df.columns) if not df.empty else 1
+                worksheet = spreadsheet.add_worksheet(title=aba_nome, rows=1000, cols=cols)
             
-            # Limpar worksheet
+            # Limpar
             worksheet.clear()
             
             # Preparar dados (cabeçalho + valores)
-            values = [df.columns.tolist()] + df.fillna("").values.tolist()
+            # SE ESTIVER VAZIO, SALVA APENAS O CABEÇALHO (Isso corrige o erro)
+            if df.empty:
+                values = [df.columns.tolist()]
+            else:
+                values = [df.columns.tolist()] + df.fillna("").values.tolist()
             
-            # Atualizar worksheet
+            # Atualizar
             worksheet.update(values, 'A1')
             
             return True
             
         except gspread.exceptions.APIError as e:
-            # Verificar se é erro de quota exceeded
             error_str = str(e).lower()
-            is_quota_error = '429' in error_str or 'quota exceeded' in error_str or 'rate limit' in error_str
-
-            if is_quota_error:
+            if '429' in error_str or 'quota exceeded' in error_str:
                 if tentativa < max_retries - 1:
                     delay = base_delay * (2 ** tentativa)
-                    if tentativa == 0:
-                        st.warning(f"⏳ Quota da API excedida ao salvar '{aba_nome}'. Aguardando {delay}s...")
                     time.sleep(delay)
                     continue
-                else:
-                    st.error(f"❌ Erro ao salvar aba '{aba_nome}': Quota da API excedida após {max_retries} tentativas.")
-                    st.info("💡 Aguarde alguns minutos antes de tentar salvar novamente.")
-                    return False
-            else:
-                st.error(f"❌ Erro ao salvar aba '{aba_nome}': {e}")
-                return False
+            return False
                 
         except Exception as e:
             if tentativa < max_retries - 1:
-                delay = base_delay * (2 ** tentativa)
-                time.sleep(delay)
+                time.sleep(base_delay * (2 ** tentativa))
                 continue
-            else:
-                st.error(f"❌ Erro ao salvar aba '{aba_nome}': {e}")
-                return False
+            st.error(f"❌ Erro ao salvar aba '{aba_nome}': {e}")
+            return False
     
     return False
 
@@ -695,27 +674,25 @@ def escrever_aba_gsheets(aba_nome: str, df: pd.DataFrame) -> bool:
 @st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False, max_entries=1)
 def carregar_banco():
     """
-    Carrega todos os dados do Google Sheets.
-    
-    Returns:
-        tuple: (turmas, curriculo, professores, config_dias, agrupamentos, horario, sucesso)
+    Carrega todos os dados do Google Sheets, incluindo a nova tabela de Carga Horária (CH).
     """
     with st.spinner("🔄 Carregando sistema..."):
+        # Se não houver conexão, retorna 7 dataframes vazios
         if gs_client is None or not PLANILHA_ID:
-            # Retornar DataFrames vazios se não houver conexão
-            empty_dfs = [pd.DataFrame() for _ in range(6)]
+            empty_dfs = [pd.DataFrame() for _ in range(7)]
             return (*empty_dfs, False)
             
         try:
-            # Ler cada aba
+            # 1. Ler Turmas
             t, ok_t = ler_aba_gsheets("Turmas", COLS_PADRAO["Turmas"])
+            
+            # 2. Ler Curriculo
             c, ok_c = ler_aba_gsheets("Curriculo", COLS_PADRAO["Curriculo"])
             
-            # Ler professores de ambas as abas (EF e DT) e combinar
+            # 3. Ler Professores (combinando abas)
             p_ef, ok_ef = ler_aba_gsheets("ProfessoresEF", COLS_PADRAO["Professores"])
             p_dt, ok_dt = ler_aba_gsheets("ProfessoresDT", COLS_PADRAO["Professores"])
             
-            # Combinar professores em um único DataFrame
             if ok_ef and ok_dt:
                 p = pd.concat([p_ef, p_dt], ignore_index=True)
                 ok_p = True
@@ -726,54 +703,51 @@ def carregar_banco():
                 p = p_dt
                 ok_p = True
             else:
-                # Tentar ler aba única "Professores" (compatibilidade com versão antiga)
                 p, ok_p = ler_aba_gsheets("Professores", COLS_PADRAO["Professores"])
             
+            # 4. Ler ConfigDias e Agrupamentos
             d, ok_d = ler_aba_gsheets("ConfigDias", COLS_PADRAO["ConfigDias"])
             r, ok_r = ler_aba_gsheets("Agrupamentos", COLS_PADRAO["Agrupamentos"])
             
-            # Horario é opcional (pode não existir ainda)
+            # 5. Ler Horario (opcional)
             h, ok_h = ler_aba_gsheets("Horario", COLS_PADRAO["Horario"])
             if not ok_h:
                 h = pd.DataFrame()
-                
+
+            # 6. Ler Tabela CH (NOVA PARTE CORRIGIDA)
+            ch_df, ok_ch = ler_aba_gsheets("CH", COLS_PADRAO["CH"])
+            
+            # Se a aba não existir ou estiver vazia, gera o padrão do código
+            if not ok_ch or ch_df.empty:
+                from ch import gerar_dataframe_ch
+                ch_df = gerar_dataframe_ch()
+            
+            # Verificar se tudo essencial carregou
             sucesso = ok_t and ok_c and ok_p and ok_d and ok_r
-            return t, c, p, d, r, h, sucesso
+            
+            # Retorna os 7 DataFrames + Status
+            return t, c, p, d, r, h, ch_df, sucesso
             
         except Exception as e:
-            # Limpar cache em caso de erro para forçar recarregamento na próxima tentativa
             st.cache_data.clear()
-
             error_msg = str(e)
             st.error(f"❌ Erro ao carregar dados: {error_msg}")
-
-            # Se for erro de quota, dar orientações específicas
-            if '429' in error_msg or 'quota exceeded' in error_msg or 'rate limit' in error_msg:
-                st.info("💡 **Quota da API excedida!**\n\n"
-                       "• Aguarde alguns minutos antes de tentar novamente\n"
-                       "• O cache foi limpo automaticamente\n"
-                       "• Evite recarregar a página frequentemente\n"
-                       "• Use o botão 'Limpar Cache' apenas quando necessário")
-            else:
-                st.info("💡 **Dicas para resolver:**\n\n"
-                       "• Verifique sua conexão com a internet\n"
-                       "• Confirme se o link da planilha está correto\n"
-                       "• Certifique-se de que o email da Service Account tem acesso à planilha\n"
-                       "• O cache foi limpo automaticamente para tentar novamente")
-
-            empty_dfs = [pd.DataFrame() for _ in range(6)]
+            
+            # Retorna vazios em caso de erro
+            empty_dfs = [pd.DataFrame() for _ in range(7)]
             return (*empty_dfs, False)
 
 # Carregar dados com tratamento de erro robusto
 try:
-    dt, dc, dp, dd, da, dh, sistema_seguro = carregar_banco()
+    # Note a variável 'dch' adicionada aqui ⬇️
+    dt, dc, dp, dd, da, dh, dch, sistema_seguro = carregar_banco()
 except Exception as e:
     st.error(f"❌ Erro crítico ao inicializar sistema: {str(e)}")
     st.info("💡 **Tente:**\n"
-           "1. Clique no botão '🚨 Reset Sistema' acima\n"
-           "2. Recarregue a página completamente (Ctrl+F5)\n"
-           "3. Verifique sua conexão com a internet\n"
-           "4. Confirme se as credenciais estão corretas no secrets.toml")
+            "1. Clique no botão '🚨 Reset Sistema' acima\n"
+            "2. Recarregue a página completamente (Ctrl+F5)\n"
+            "3. Verifique sua conexão com a internet\n"
+            "4. Confirme se as credenciais estão corretas no secrets.toml")
     # Forçar parada se houver erro crítico
     st.stop()
 
@@ -1402,7 +1376,21 @@ with t2:
             if st.form_submit_button("Add"):
                 dc = pd.concat([dc, pd.DataFrame([{"SÉRIE/ANO": a, "COMPONENTE": m, "QTD_AULAS": q}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
     botao_salvar("Salvar Config", "bcfg")
+    
+    st.markdown("---")
+    st.subheader("📜 Tabela de PL (Lei 1.071/2017)")
 
+    # Mostra a tabela atual do código
+    df_pl_padrao = gerar_dataframe_ch()
+    st.dataframe(df_pl_padrao, use_container_width=True, hide_index=True)
+
+    if st.button("💾 Gravar Tabela PL na Planilha Google"):
+        if sistema_seguro:
+            escrever_aba_gsheets("CH", df_pl_padrao)
+            st.success("✅ Tabela de Carga Horária salva na aba 'CH'!")
+        else:
+            st.error("Sem conexão com a planilha.")
+            
 # ABA 3: ROTAS (MANTENHA O MESMO CÓDIGO)
 with t3:
     da = st.data_editor(da, num_rows="dynamic", key="edr")
@@ -1433,8 +1421,10 @@ with t4:
     botao_salvar("Salvar Turmas", "btur")
 
 # ABA 5: PROFESSORES (MANTENHA O MESMO CÓDIGO)
+
+# ABA 5: PROFESSORES
 with t5:
-    # Exibir estatísticas reais
+    # --- 1. ESTATÍSTICAS REAIS ---
     if not dt.empty and not dc.empty:
         st.info("📊 **Estatísticas Reais da Rede:**")
         col1, col2, col3 = st.columns(3)
@@ -1457,42 +1447,78 @@ with t5:
         with col2:
             st.metric("Aulas Oferta", oferta_real)
         with col3:
-            st.metric("Saldo", demanda_real - oferta_real)
+            saldo = demanda_real - oferta_real
+            st.metric("Saldo", saldo, delta_color="inverse")
         
-        if demanda_real > oferta_real:
-            st.warning(f"⚠️ Déficit de {demanda_real - oferta_real} aulas")
+        if saldo > 0:
+            st.warning(f"⚠️ Déficit de {saldo} aulas! Use a ferramenta abaixo para corrigir.")
+
+    # --- 2. FERRAMENTA INTELIGENTE (CORRIGIDA) ---
+    st.markdown("---")
     
-    with st.expander("🤖 Ferramenta: Gerar Vagas Automáticas (Balanceamento)", expanded=False):
-        st.info("Distribui a carga de forma equilibrada (Teto 30h, Mínimo 14h, Média Alvo 20h).")
-        c_rh1, c_rh2, c_rh3, c_btn = st.columns([1,1,1,1])
-        with c_rh1: carga_min = st.number_input("Carga Mínima", 5, 20, CARGA_MINIMA_PADRAO)
-        with c_rh2: carga_max = st.number_input("Carga Máxima (Teto)", 20, 50, CARGA_MAXIMA_PADRAO)
-        with c_rh3: media_alvo = st.number_input("Média Alvo", 10, 40, MEDIA_ALVO_PADRAO)
+    # Preparar estado para não sumir o resultado
+    if 'resultado_vagas_smart' not in st.session_state:
+        st.session_state['resultado_vagas_smart'] = None
+
+    with st.expander("🤖 Ferramenta: Gerar Vagas Automáticas (INTELIGENTE)", expanded=False):
+        st.info("🚀 Esta ferramenta agora considera **Dias de Aula**, **Simultaneidade** e **Rotas**, além do volume total.")
+        
+        # Layout das colunas APENAS para o texto e o botão
+        c_rh1, c_btn = st.columns([3,1])
+        
+        with c_rh1: 
+            st.write("**Como funciona:**")
+            st.caption("1. Analisa o 'ConfigDias' para ver quantas turmas têm aula ao mesmo tempo.")
+            st.caption("2. Define o mínimo de professores para cobrir esse pico.")
+            st.caption("3. Cria vagas compartilhadas entre Fundão e Timbuí automaticamente.")
+            
         with c_btn:
             st.write(""); st.write("")
-            if st.button("🚀 Calcular e Criar"):
-                # Mostrar demanda real antes de calcular
-                demanda_real = 0
-                for _, turma in dt.iterrows():
-                    curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
-                    for _, item in curr.iterrows():
-                        if padronizar_materia_interna(item['COMPONENTE']) in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                            demanda_real += int(item['QTD_AULAS'])
-                
-                st.write(f"**Demanda real:** {demanda_real} aulas")
-                
-                novos, log = gerar_professores_v52(dt, dc, dp, carga_min, carga_max, media_alvo)
-                if not novos.empty:
-                    st.write(f"**Criando {len(novos)} novos professores:**")
-                    st.dataframe(novos[['CÓDIGO', 'NOME', 'CARGA_HORÁRIA']])
+            # Capturamos o clique aqui
+            processar = st.button("🚀 Calcular e Criar Vagas", use_container_width=True)
+
+        # --- LÓGICA DE PROCESSAMENTO (Fora das colunas para largura total) ---
+        if processar:
+            if dt.empty or dc.empty or dd.empty:
+                st.error("❌ Faltam dados (Turmas, Currículo ou ConfigDias).")
+            else:
+                with st.spinner("Processando demanda inteligente..."):
+                    from inteligencia import gerar_novos_professores_inteligentes
+                    novos, analise = gerar_novos_professores_inteligentes(dt, dc, dd, da, dp)
                     
-                    if st.button("✅ Confirmar Criação"):
+                    if not novos.empty:
+                        # 1. Salvar no banco
                         dp = pd.concat([dp, novos], ignore_index=True)
                         salvar_seguro(dt, dc, dp, dd, da)
-                        st.success(f"{len(novos)} novos contratos criados!")
-                else: 
-                    st.success("✅ Tudo otimizado! Sem vagas novas.")
+                        
+                        # 2. Salvar no Estado para mostrar após o refresh
+                        st.session_state['resultado_vagas_smart'] = novos
+                        
+                        # 3. Recarregar
+                        st.rerun()
+                    else:
+                        st.session_state['resultado_vagas_smart'] = pd.DataFrame() # Vazio para indicar sucesso sem vagas
+                        st.success("✅ O quadro atual já atende toda a demanda!")
 
+        # --- EXIBIÇÃO DO RESULTADO (Persistente) ---
+        if st.session_state['resultado_vagas_smart'] is not None:
+            res = st.session_state['resultado_vagas_smart']
+            if not res.empty:
+                st.divider()
+                st.success(f"✅ {len(res)} novos contratos foram criados e salvos!")
+                
+                st.markdown("### 📋 Detalhes dos Novos Contratos:")
+                st.dataframe(
+                    res[['CÓDIGO', 'NOME', 'CARGA_HORÁRIA', 'REGIÃO', 'QTD_PL']], 
+                    use_container_width=True
+                )
+            
+            # Botão para limpar a visualização
+            if st.button("🧹 Limpar Resultado da Tela"):
+                st.session_state['resultado_vagas_smart'] = None
+                st.rerun()
+
+    # --- 3. ADICIONAR PROFESSOR MANUAL ---
     with st.expander("➕ Novo Professor Manual", expanded=False):
         tp = st.radio("Vínculo", ["DT", "EFETIVO"], horizontal=True)
         with st.form("fp"):
@@ -1508,12 +1534,22 @@ with t5:
                 ef_esc = st.multiselect("Escolas", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
                 ef_trn = st.selectbox("Turno", ["", "MATUTINO", "VESPERTINO", "AMBOS"])
             else: ef_esc, ef_trn = [], ""
+            
             if st.form_submit_button("Salvar"):
                 str_esc = ",".join(ef_esc) if ef_esc else ""
-                dp = pd.concat([dp, pd.DataFrame([{"CÓDIGO": cd, "NOME": padronizar(nm), "CARGA_HORÁRIA": ch, "QTD_PL": pl, "REGIÃO": rg, "COMPONENTES": ",".join(cm), "VÍNCULO": tp, "ESCOLAS_ALOCADAS": str_esc, "TURNO_FIXO": ef_trn}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
-    
-    dp = st.data_editor(dp, num_rows="dynamic", key="edp")
-    botao_salvar("Salvar Profs", "bprof")
+                dp = pd.concat([dp, pd.DataFrame([{
+                    "CÓDIGO": cd, "NOME": padronizar(nm), "CARGA_HORÁRIA": ch, 
+                    "QTD_PL": pl, "REGIÃO": rg, "COMPONENTES": ",".join(cm), 
+                    "VÍNCULO": tp, "ESCOLAS_ALOCADAS": str_esc, "TURNO_FIXO": ef_trn
+                }])], ignore_index=True)
+                salvar_seguro(dt, dc, dp, dd, da)
+
+    # --- 4. TABELA GERAL EDITÁVEL ---
+    st.markdown("---")
+    st.markdown("### 👨‍🏫 Quadro Geral de Professores")
+    dp = st.data_editor(dp, num_rows="dynamic", key="edp", use_container_width=True)
+    botao_salvar("Salvar Alterações na Tabela", "bprof")
+
 
 # ABA 6: VAGAS - Gerador de Possibilidades
 # ABA 6: VAGAS - Gerador de Possibilidades
