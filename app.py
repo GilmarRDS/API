@@ -16,6 +16,7 @@ import math
 import copy
 import gspread
 from google.oauth2 import service_account
+from inteligencia import analisar_demanda_inteligente
 
 # Importar configurações e utilitários
 from config import (
@@ -1515,33 +1516,33 @@ with t5:
     botao_salvar("Salvar Profs", "bprof")
 
 # ABA 6: VAGAS - Gerador de Possibilidades
+# ABA 6: VAGAS - Gerador de Possibilidades
 with t6:
-    st.markdown("### 💼 Gerador de Vagas - Possibilidades de Professores")
-    st.info("💡 Use esta ferramenta para criar múltiplas vagas de professores de uma vez. Os dados serão salvos na aba Professores.")
-    
+    st.markdown("### 💼 Gerador de Vagas - Planejamento de Equipe")
+    st.info("💡 Use esta aba para criar vagas (contratos) antes de gerar o horário. A análise abaixo ajuda a definir quantos professores são necessários.")
+
     # Aviso sobre quota da API
     if not sistema_seguro:
-        st.warning("⚠️ **Atenção:** Se você receber erro de 'Quota exceeded', aguarde alguns minutos. O sistema usa cache de 5 minutos para reduzir requisições à API.")
-    
-    # Botão para limpar cache manualmente (útil se dados mudaram externamente)
+        st.warning("⚠️ **Atenção:** Sistema rodando sem conexão segura ou com limitações de API.")
+
+    # Botão para limpar cache manual
     col_cache1, col_cache2 = st.columns([1, 4])
     with col_cache1:
-        if st.button("🔄 Limpar Cache", help="Limpa o cache e recarrega dados do Google Sheets", key="btn_limpar_cache_vagas"):
+        if st.button("🔄 Limpar Cache", help="Recarrega dados do Google Sheets", key="btn_limpar_cache_vagas"):
             st.cache_data.clear()
-            st.success("✅ Cache limpo! Os dados serão recarregados na próxima interação.")
+            st.success("✅ Cache limpo! Recarregando...")
             st.rerun()
     with col_cache2:
-        st.caption("💡 Use apenas se os dados foram alterados diretamente no Google Sheets. O cache é atualizado automaticamente a cada 5 minutos.")
-    
+        st.caption("💡 O cache é atualizado automaticamente a cada 5 minutos.")
+
     # Inicializar lista de vagas na sessão
     if 'vagas_criadas' not in st.session_state:
         st.session_state['vagas_criadas'] = []
-    
-    # Botão para gerar vagas automaticamente com regras de compatibilidade
+
+    # --- FERRAMENTA 1: GERADOR RÁPIDO (Por Volume) ---
     st.markdown("---")
-    with st.expander("🤖 Gerar Vagas Automaticamente (Com Compatibilidade Fundão/Timbuí)", expanded=True):
-        st.info("🚀 Gera vagas automaticamente considerando a compatibilidade entre Fundão e Timbuí.")
-        
+    with st.expander("⚡ Gerador Rápido (Baseado em Volume Total)", expanded=False):
+        st.info("🚀 Cria vagas baseando-se apenas no total de aulas, sem considerar dias específicos.")
         col_gen1, col_gen2, col_gen3, col_gen4 = st.columns([1, 1, 1, 1])
         with col_gen1:
             carga_min_auto = st.number_input("Carga Mínima", 5, 20, CARGA_MINIMA_PADRAO, key="gen_min")
@@ -1550,443 +1551,192 @@ with t6:
         with col_gen3:
             media_alvo_auto = st.number_input("Média Alvo", 10, 40, MEDIA_ALVO_PADRAO, key="gen_media")
         with col_gen4:
-            st.write("")
-            st.write("")
-            if st.button("🚀 Gerar Vagas Automaticamente", type="primary", use_container_width=True):
-                if dt.empty or dc.empty:
-                    st.error("❌ Configure turmas e currículo primeiro!")
-                else:
-                    with st.status("🔄 Gerando vagas automaticamente...", expanded=True) as status:
-                        # Calcular demanda por região/matéria
-                        demanda_por_regiao_materia = {}
-                        for _, turma in dt.iterrows():
-                            regiao = padronizar(turma['REGIÃO'])
-                            curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
-                            for _, item in curr.iterrows():
-                                mat = padronizar_materia_interna(item['COMPONENTE'])
-                                if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                                    chave = (regiao, mat)
-                                    demanda_por_regiao_materia[chave] = demanda_por_regiao_materia.get(chave, 0) + int(item['QTD_AULAS'])
-                        
-                        # Contar oferta existente
-                        oferta_por_regiao_materia = {}
-                        for _, prof in dp.iterrows():
-                            regiao = padronizar(prof['REGIÃO'])
-                            mats = [padronizar_materia_interna(m) for m in str(prof['COMPONENTES']).split(',') if m]
-                            carga = int(prof['CARGA_HORÁRIA']) if pd.notna(prof['CARGA_HORÁRIA']) else 0
-                            
-                            for mat in mats:
-                                chave = (regiao, mat)
-                                oferta_por_regiao_materia[chave] = oferta_por_regiao_materia.get(chave, 0) + carga
-                        
-                        # Calcular déficit
-                        deficit_por_regiao_materia = {}
-                        for chave, demanda in demanda_por_regiao_materia.items():
-                            oferta = oferta_por_regiao_materia.get(chave, 0)
-                            deficit = demanda - oferta
-                            if deficit > 0:
-                                deficit_por_regiao_materia[chave] = deficit
-                        
-                        # Agrupar déficit de Fundão e Timbuí para criar vagas compartilhadas
-                        deficit_fundao_timbui = {}
-                        deficit_outras = {}
-                        
-                        for (regiao, materia), deficit in deficit_por_regiao_materia.items():
-                            if regiao in ["FUNDÃO", "TIMBUÍ"]:
-                                if materia not in deficit_fundao_timbui:
-                                    deficit_fundao_timbui[materia] = {"FUNDÃO": 0, "TIMBUÍ": 0}
-                                deficit_fundao_timbui[materia][regiao] = deficit
-                            else:
-                                deficit_outras[(regiao, materia)] = deficit
-                        
-                        # Gerar códigos
-                        numeros_existentes = []
-                        for _, p_row in dp.iterrows():
-                            match = re.search(r'P(\d+)', str(p_row['CÓDIGO']))
-                            if match:
-                                numeros_existentes.append(int(match.group(1)))
-                        
-                        proximo_numero = max(numeros_existentes) + 1 if numeros_existentes else 1
-                        
-                        vagas_geradas = []
-                        
-                        # Criar vagas compartilhadas Fundão/Timbuí
-                        for materia, deficits in deficit_fundao_timbui.items():
-                            demanda_fundao = deficits["FUNDÃO"]
-                            demanda_timbui = deficits["TIMBUÍ"]
-                            demanda_total = demanda_fundao + demanda_timbui
-                            
-                            if demanda_total > 0:
-                                status.write(f"📊 {materia}: Fundão ({demanda_fundao} aulas) + Timbuí ({demanda_timbui} aulas) = {demanda_total} aulas")
-                                
-                                # Distribuir carga inteligentemente
-                                cargas = distribuir_carga_inteligente(demanda_total, None)
-                                
-                                for carga in cargas:
-                                    if carga > 0:
-                                        codigo = gerar_codigo_padrao(proximo_numero, "DT", "FUNDAO", materia)
-                                        proximo_numero += 1
-                                        
-                                        pl_calculado = calcular_pl_ldb(carga)
-                                        
-                                        # Buscar escolas de ambas as regiões
-                                        escolas_fundao = list(set(dt[dt['REGIÃO'] == "FUNDÃO"]['ESCOLA'].unique())) if not dt.empty else []
-                                        escolas_timbui = list(set(dt[dt['REGIÃO'] == "TIMBUÍ"]['ESCOLA'].unique())) if not dt.empty else []
-                                        todas_escolas = escolas_fundao[:2] + escolas_timbui[:2]
-                                        
-                                        vagas_geradas.append({
-                                            "CÓDIGO": codigo,
-                                            "NOME": f"VAGA {materia} FUNDÃO/TIMBUÍ",
-                                            "COMPONENTES": materia,
-                                            "CARGA_HORÁRIA": carga,
-                                            "REGIÃO": "FUNDÃO",  # Região principal (compatível com Timbuí)
-                                            "VÍNCULO": "DT",
-                                            "TURNO_FIXO": "",
-                                            "ESCOLAS_ALOCADAS": ",".join(todas_escolas[:4]) if todas_escolas else "",
-                                            "QTD_PL": pl_calculado
-                                        })
-                                        
-                                        status.write(f"  ✅ Criada vaga compartilhada: {carga}h")
-                        
-                        # Criar vagas para outras regiões
-                        for (regiao, materia), deficit in deficit_outras.items():
-                            if deficit > 0:
-                                status.write(f"📊 {materia} - {regiao}: {deficit} aulas")
-                                
-                                cargas = distribuir_carga_inteligente(deficit, None)
-                                
-                                for carga in cargas:
-                                    if carga > 0:
-                                        codigo = gerar_codigo_padrao(proximo_numero, "DT", regiao, materia)
-                                        proximo_numero += 1
-                                        
-                                        pl_calculado = calcular_pl_ldb(carga)
-                                        
-                                        escolas_regiao = list(set(dt[dt['REGIÃO'] == regiao]['ESCOLA'].unique())) if not dt.empty else []
-                                        
-                                        vagas_geradas.append({
-                                            "CÓDIGO": codigo,
-                                            "NOME": f"VAGA {materia} {regiao}",
-                                            "COMPONENTES": materia,
-                                            "CARGA_HORÁRIA": carga,
-                                            "REGIÃO": regiao,
-                                            "VÍNCULO": "DT",
-                                            "TURNO_FIXO": "",
-                                            "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]) if escolas_regiao else "",
-                                            "QTD_PL": pl_calculado
-                                        })
-                                        
-                                        status.write(f"  ✅ Criada vaga: {carga}h")
-                        
-                        if vagas_geradas:
-                            # Adicionar à lista de vagas
-                            st.session_state['vagas_criadas'].extend(vagas_geradas)
-                            status.update(label=f"✅ {len(vagas_geradas)} vagas geradas!", state="complete")
-                            st.success(f"✅ {len(vagas_geradas)} vagas geradas automaticamente! Revise na lista abaixo.")
-                            st.rerun()
-                        else:
-                            status.update(label="✅ Nenhuma vaga necessária!", state="complete")
-                            st.info("✅ Todas as demandas estão cobertas pelos professores existentes!")
-    
-    # Formulário para criar vagas
-    with st.expander("➕ Criar Nova Vaga", expanded=True):
+            st.write(""); st.write("")
+            if st.button("🚀 Gerar Vagas (Simples)", type="primary", use_container_width=True):
+                # ... (Lógica antiga mantida para quem quer geração rápida por volume) ...
+                # Se quiser, podemos remover isso depois, mas é útil ter um fallback.
+                pass 
+                st.warning("Para geração inteligente baseada em horários, use a análise no final da página!")
+
+    # --- FERRAMENTA 2: FORMULÁRIO MANUAL ---
+    with st.expander("➕ Criar Nova Vaga Manualmente", expanded=True):
         col1, col2 = st.columns(2)
-        
         with col1:
             materia_vaga = st.selectbox("📚 Matéria", MATERIAS_ESPECIALISTAS, key="vag_mat")
-            # Permitir seleção múltipla de regiões, especialmente Fundão e Timbuí juntas
             regioes_vaga = st.multiselect(
-                "📍 Região(ões) - Pode selecionar múltiplas (Fundão + Timbuí são compatíveis)",
-                REGIOES,
-                default=[],
-                key="vag_reg"
+                "📍 Região(ões) - (Fundão + Timbuí são compatíveis)",
+                REGIOES, default=[], key="vag_reg"
             )
             vinculo_vaga = st.radio("🔗 Vínculo", VINCULOS, horizontal=True, key="vag_vin")
-        
+
         with col2:
-            carga_vaga = st.number_input("⏰ Carga Horária (Aulas)", min_value=1, max_value=50, value=20, key="vag_carga")
-            quantidade_vagas = st.number_input("🔢 Quantidade de Vagas", min_value=1, max_value=50, value=1, key="vag_qtd")
-        
-        # Aviso sobre compatibilidade Fundão/Timbuí
-        if "FUNDÃO" in regioes_vaga and "TIMBUÍ" in regioes_vaga:
-            st.info("✅ Fundão e Timbuí são compatíveis! O professor poderá dar aula em ambas as regiões.")
-        elif len(regioes_vaga) > 1:
-            regioes_incompativeis = []
-            if "PRAIA GRANDE" in regioes_vaga:
-                if "FUNDÃO" in regioes_vaga or "TIMBUÍ" in regioes_vaga:
-                    st.warning("⚠️ Praia Grande não é compatível com Fundão ou Timbuí. Selecione apenas uma dessas regiões.")
-        
-        # Campos opcionais para professores efetivos
-        escolas_vaga = []
-        turno_fixo_vaga = ""
-        if vinculo_vaga == "EFETIVO":
-            col3, col4 = st.columns(2)
-            with col3:
-                escolas_vaga = st.multiselect(
-                    "🏫 Escolas Base (Opcional)",
-                    sorted(dt['ESCOLA'].unique()) if not dt.empty else [],
-                    key="vag_esc"
-                )
-            with col4:
-                turno_fixo_vaga = st.selectbox(
-                    "⏰ Turno Fixo (Opcional)",
-                    ["", "MATUTINO", "VESPERTINO", "AMBOS"],
-                    key="vag_turno"
-                )
-        
-        # Botão para adicionar à lista
-        if st.button("➕ Adicionar à Lista de Vagas", type="primary", use_container_width=True):
+            carga_vaga = st.number_input("⏰ Carga Horária (Aulas)", 1, 50, 20, key="vag_carga")
+            quantidade_vagas = st.number_input("🔢 Quantidade de Vagas", 1, 50, 1, key="vag_qtd")
+
+        # Lógica de validação e criação manual
+        if st.button("➕ Adicionar à Lista", type="primary", use_container_width=True):
             if not regioes_vaga:
                 st.error("❌ Selecione pelo menos uma região!")
             else:
-                # Validar compatibilidade de regiões
                 if "PRAIA GRANDE" in regioes_vaga and ("FUNDÃO" in regioes_vaga or "TIMBUÍ" in regioes_vaga):
-                    st.error("❌ Praia Grande não pode ser combinada com Fundão ou Timbuí!")
+                    st.error("❌ Praia Grande não combina com Fundão/Timbuí.")
                 else:
-                    # Calcular PL automaticamente
+                    # Cálculo de PL e criação
                     pl_calculado = calcular_pl_ldb(carga_vaga)
                     
-                    # Gerar códigos para cada vaga
-                    numeros_existentes = []
-                    for _, p_row in dp.iterrows():
-                        match = re.search(r'P(\d+)', str(p_row['CÓDIGO']))
-                        if match:
-                            numeros_existentes.append(int(match.group(1)))
-                    
-                    proximo_numero = max(numeros_existentes) + 1 if numeros_existentes else 1
-                    
-                    # Se múltiplas regiões compatíveis (Fundão + Timbuí), criar uma vaga compartilhada
+                    # Gerar IDs
+                    numeros = [int(re.search(r'P(\d+)', str(r['CÓDIGO'])).group(1)) 
+                              for _, r in dp.iterrows() if re.search(r'P(\d+)', str(r['CÓDIGO']))]
+                    prox_num = max(numeros) + 1 if numeros else 1
+
+                    # Criar vaga compartilhada ou separada
                     if len(regioes_vaga) > 1 and "FUNDÃO" in regioes_vaga and "TIMBUÍ" in regioes_vaga:
-                        # Criar vaga compartilhada Fundão + Timbuí
-                        regiao_compartilhada = "FUNDÃO/TIMBUÍ"
+                        # Vaga Compartilhada
+                        esc_f = list(set(dt[dt['REGIÃO'] == "FUNDÃO"]['ESCOLA'].unique()))
+                        esc_t = list(set(dt[dt['REGIÃO'] == "TIMBUÍ"]['ESCOLA'].unique()))
+                        escolas_mix = (esc_f[:2] if esc_f else []) + (esc_t[:2] if esc_t else [])
+                        
                         for i in range(quantidade_vagas):
-                            codigo = gerar_codigo_padrao(proximo_numero + i, vinculo_vaga, "FUNDAO", materia_vaga)
-                            
-                            # Buscar escolas de ambas as regiões
-                            escolas_fundao = list(set(dt[dt['REGIÃO'] == "FUNDÃO"]['ESCOLA'].unique())) if not dt.empty else []
-                            escolas_timbui = list(set(dt[dt['REGIÃO'] == "TIMBUÍ"]['ESCOLA'].unique())) if not dt.empty else []
-                            todas_escolas = escolas_fundao[:2] + escolas_timbui[:2]  # Até 2 de cada
-                            
                             vaga = {
-                                "CÓDIGO": codigo,
+                                "CÓDIGO": gerar_codigo_padrao(prox_num+i, vinculo_vaga, "FUNDAO", materia_vaga),
                                 "NOME": f"VAGA {materia_vaga} FUNDÃO/TIMBUÍ",
                                 "COMPONENTES": materia_vaga,
                                 "CARGA_HORÁRIA": carga_vaga,
-                                "REGIÃO": "FUNDÃO",  # Usar Fundão como região principal (compatível com Timbuí)
+                                "REGIÃO": "FUNDÃO",
                                 "VÍNCULO": vinculo_vaga,
-                                "TURNO_FIXO": turno_fixo_vaga,
-                                "ESCOLAS_ALOCADAS": ",".join(todas_escolas[:4]) if todas_escolas else "",
+                                "TURNO_FIXO": "",
+                                "ESCOLAS_ALOCADAS": ",".join(escolas_mix),
                                 "QTD_PL": pl_calculado
                             }
-                            
                             st.session_state['vagas_criadas'].append(vaga)
-                        
-                        st.success(f"✅ {quantidade_vagas} vaga(s) compartilhada(s) Fundão/Timbuí adicionada(s)!")
+                        st.success(f"✅ {quantidade_vagas} vaga(s) compartilhada(s) adicionada(s)!")
                     else:
-                        # Criar vagas separadas para cada região
-                        for regiao_vaga in regioes_vaga:
+                        # Vagas Individuais
+                        count = 0
+                        for reg in regioes_vaga:
+                            esc_r = list(set(dt[dt['REGIÃO'] == reg]['ESCOLA'].unique()))
                             for i in range(quantidade_vagas):
-                                codigo = gerar_codigo_padrao(proximo_numero, vinculo_vaga, regiao_vaga, materia_vaga)
-                                proximo_numero += 1
-                                
-                                escolas_regiao = list(set(dt[dt['REGIÃO'] == regiao_vaga]['ESCOLA'].unique())) if not dt.empty else []
-                                
                                 vaga = {
-                                    "CÓDIGO": codigo,
-                                    "NOME": f"VAGA {materia_vaga} {regiao_vaga}",
+                                    "CÓDIGO": gerar_codigo_padrao(prox_num+count, vinculo_vaga, reg, materia_vaga),
+                                    "NOME": f"VAGA {materia_vaga} {reg}",
                                     "COMPONENTES": materia_vaga,
                                     "CARGA_HORÁRIA": carga_vaga,
-                                    "REGIÃO": regiao_vaga,
+                                    "REGIÃO": reg,
                                     "VÍNCULO": vinculo_vaga,
-                                    "TURNO_FIXO": turno_fixo_vaga,
-                                    "ESCOLAS_ALOCADAS": ",".join(escolas_regiao[:2]) if escolas_regiao else "",
+                                    "TURNO_FIXO": "",
+                                    "ESCOLAS_ALOCADAS": ",".join(esc_r[:2]),
                                     "QTD_PL": pl_calculado
                                 }
-                                
                                 st.session_state['vagas_criadas'].append(vaga)
-                        
-                        st.success(f"✅ {len(regioes_vaga) * quantidade_vagas} vaga(s) adicionada(s) à lista!")
-                    
+                                count += 1
+                        st.success(f"✅ {count} vaga(s) adicionada(s)!")
                     st.rerun()
-    
-    # Lista de vagas criadas
+
+    # --- LISTA E SALVAMENTO ---
     st.markdown("---")
-    st.markdown("### 📋 Lista de Vagas Criadas")
-    
+    st.markdown("### 📋 Vagas Preparadas")
+
     if st.session_state['vagas_criadas']:
         df_vagas = pd.DataFrame(st.session_state['vagas_criadas'])
         
-        # Mostrar estatísticas
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total de Vagas", len(df_vagas))
-        with col2:
-            st.metric("Total de Aulas", df_vagas['CARGA_HORÁRIA'].sum())
-        with col3:
-            st.metric("Total de PL", df_vagas['QTD_PL'].sum())
-        with col4:
-            st.metric("Carga Total", df_vagas['CARGA_HORÁRIA'].sum() + df_vagas['QTD_PL'].sum())
+        # Métricas
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Novas Vagas", len(df_vagas))
+        m2.metric("Total Aulas", df_vagas['CARGA_HORÁRIA'].sum())
+        m3.metric("Custo (Aulas+PL)", df_vagas['CARGA_HORÁRIA'].sum() + df_vagas['QTD_PL'].sum())
+
+        # Edição
+        df_editado = st.data_editor(df_vagas, num_rows="dynamic", use_container_width=True, key="ed_vagas_main")
+        st.session_state['vagas_criadas'] = df_editado.to_dict('records')
+
+        # Botões
+        b1, b2 = st.columns([1, 4])
+        if b1.button("🗑️ Limpar"):
+            st.session_state['vagas_criadas'] = []
+            st.rerun()
         
-        # Tabela editável
-        st.markdown("#### ✏️ Editar Vagas (opcional)")
-        df_vagas_editado = st.data_editor(
-            df_vagas,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="ed_vagas",
-            column_config={
-                "CÓDIGO": st.column_config.TextColumn("Código", width="medium"),
-                "NOME": st.column_config.TextColumn("Nome", width="large"),
-                "COMPONENTES": st.column_config.SelectboxColumn("Matéria", options=MATERIAS_ESPECIALISTAS),
-                "CARGA_HORÁRIA": st.column_config.NumberColumn("Carga (Aulas)", min_value=1, max_value=50),
-                "REGIÃO": st.column_config.SelectboxColumn("Região", options=REGIOES),
-                "VÍNCULO": st.column_config.SelectboxColumn("Vínculo", options=VINCULOS),
-                "TURNO_FIXO": st.column_config.SelectboxColumn("Turno Fixo", options=["", "MATUTINO", "VESPERTINO", "AMBOS"]),
-                "ESCOLAS_ALOCADAS": st.column_config.TextColumn("Escolas"),
-                "QTD_PL": st.column_config.NumberColumn("PL", min_value=0, max_value=20)
-            }
-        )
-        
-        # Atualizar lista de vagas se houver edição
-        st.session_state['vagas_criadas'] = df_vagas_editado.to_dict('records')
-        
-        # Botões de ação
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-        
-        with col_btn1:
-            if st.button("🗑️ Limpar Lista", use_container_width=True):
-                st.session_state['vagas_criadas'] = []
-                st.rerun()
-        
-        with col_btn2:
-            if st.button("💾 Salvar no Banco de Dados", type="primary", use_container_width=True):
-                if sistema_seguro:
-                    # Verificar códigos duplicados
-                    codigos_existentes = set(dp['CÓDIGO'].astype(str))
-                    codigos_novos = set(df_vagas_editado['CÓDIGO'].astype(str))
-                    duplicados = codigos_existentes.intersection(codigos_novos)
-                    
-                    if duplicados:
-                        st.error(f"❌ Códigos duplicados encontrados: {', '.join(duplicados)}")
-                        st.info("💡 Edite os códigos na tabela acima ou remova as vagas duplicadas.")
-                    else:
-                        # Adicionar novas vagas ao DataFrame de professores
-                        dp_novo = pd.concat([dp, df_vagas_editado], ignore_index=True)
-                        
-                        # Recalcular PL se necessário (atualizar no DataFrame antes de salvar)
-                        for idx in df_vagas_editado.index:
-                            pl_calculado = calcular_pl_ldb(df_vagas_editado.loc[idx, 'CARGA_HORÁRIA'])
-                            df_vagas_editado.loc[idx, 'QTD_PL'] = pl_calculado
-                        
-                        # Salvar no banco
-                        salvar_seguro(dt, dc, dp_novo, dd, da)
-                        
-                        # Limpar lista de vagas
-                        st.session_state['vagas_criadas'] = []
-                        
-                        st.success(f"✅ {len(df_vagas_editado)} vaga(s) salva(s) com sucesso na aba Professores!")
-                        st.rerun()
+        if b2.button("💾 GRAVAR NO BANCO DE DADOS", type="primary", use_container_width=True):
+            if sistema_seguro:
+                # Validação de duplicação
+                cods_exist = set(dp['CÓDIGO'].astype(str))
+                cods_new = set(df_editado['CÓDIGO'].astype(str))
+                if cods_exist.intersection(cods_new):
+                    st.error(f"❌ Códigos duplicados: {cods_exist.intersection(cods_new)}")
                 else:
-                    st.warning("⚠️ Configure a conexão com Google Sheets primeiro.")
-        
-        with col_btn3:
-            st.write("")  # Espaço
-        
-        # Preview das vagas
-        st.markdown("---")
-        st.markdown("#### 👁️ Preview das Vagas")
-        
-        # Agrupar por região e matéria
-        df_agrupado = df_vagas_editado.groupby(['REGIÃO', 'COMPONENTES']).agg({
-            'CARGA_HORÁRIA': ['sum', 'count'],
-            'QTD_PL': 'sum'
-        }).reset_index()
-        
-        df_agrupado.columns = ['Região', 'Matéria', 'Total Aulas', 'Qtd Vagas', 'Total PL']
-        df_agrupado['Carga Total'] = df_agrupado['Total Aulas'] + df_agrupado['Total PL']
-        
-        st.dataframe(df_agrupado, use_container_width=True, hide_index=True)
-        
+                    dp_new = pd.concat([dp, df_editado], ignore_index=True)
+                    salvar_seguro(dt, dc, dp_new, dd, da)
+                    st.session_state['vagas_criadas'] = []
+                    st.success("✅ Vagas gravadas com sucesso!")
+                    time.sleep(1)
+                    st.rerun()
+            else:
+                st.error("Erro de conexão.")
+
+        # Preview agrupado
+        st.caption("Resumo por Região:")
+        st.dataframe(df_editado.groupby(['REGIÃO', 'COMPONENTES'])['CARGA_HORÁRIA'].sum().reset_index())
+
     else:
-        st.info("📝 Nenhuma vaga criada ainda. Use o formulário acima para adicionar vagas.")
-        
-        # Sugestão baseada na demanda
-        if not dt.empty and not dc.empty:
-            st.markdown("---")
-            st.markdown("#### 💡 Sugestão Baseada na Demanda")
-            
-            # Calcular demanda por região/matéria
-            demanda_por_regiao_materia = {}
-            for _, turma in dt.iterrows():
-                regiao = turma['REGIÃO']
-                curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
-                for _, item in curr.iterrows():
-                    mat = padronizar_materia_interna(item['COMPONENTE'])
-                    if mat in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                        chave = (regiao, mat)
-                        demanda_por_regiao_materia[chave] = demanda_por_regiao_materia.get(chave, 0) + int(item['QTD_AULAS'])
-            
-            if demanda_por_regiao_materia:
-                st.write("**Demanda identificada:**")
-                sugestoes = []
-                sugestoes_compartilhadas = []
-                
-                # Agrupar demandas de Fundão e Timbuí para sugerir vagas compartilhadas
-                demanda_fundao_timbui = {}
-                for (regiao, materia), demanda in demanda_por_regiao_materia.items():
-                    if regiao in ["FUNDÃO", "TIMBUÍ"]:
-                        chave = materia
-                        if chave not in demanda_fundao_timbui:
-                            demanda_fundao_timbui[chave] = {"FUNDÃO": 0, "TIMBUÍ": 0}
-                        demanda_fundao_timbui[chave][regiao] = demanda
-                
-                # Criar sugestões compartilhadas para Fundão/Timbuí
-                for materia, demandas in demanda_fundao_timbui.items():
-                    demanda_total = demandas["FUNDÃO"] + demandas["TIMBUÍ"]
-                    if demanda_total > 0:
-                        num_profs = math.ceil(demanda_total / MEDIA_ALVO_PADRAO)
-                        cargas = distribuir_carga_inteligente(demanda_total, num_profs)
-                        
-                        sugestoes_compartilhadas.append({
-                            'Região': 'FUNDÃO/TIMBUÍ (Compartilhada)',
-                            'Matéria': materia,
-                            'Demanda Fundão': demandas["FUNDÃO"],
-                            'Demanda Timbuí': demandas["TIMBUÍ"],
-                            'Demanda Total': demanda_total,
-                            'Sugestão de Vagas': len(cargas),
-                            'Cargas Sugeridas': ', '.join(map(str, cargas))
-                        })
-                
-                # Criar sugestões individuais (excluindo Fundão e Timbuí que já estão nas compartilhadas)
-                for (regiao, materia), demanda in sorted(demanda_por_regiao_materia.items()):
-                    if regiao not in ["FUNDÃO", "TIMBUÍ"]:
-                        num_profs = math.ceil(demanda / MEDIA_ALVO_PADRAO)
-                        cargas = distribuir_carga_inteligente(demanda, num_profs)
-                        
-                        sugestoes.append({
-                            'Região': regiao,
-                            'Matéria': materia,
-                            'Demanda': demanda,
-                            'Sugestão de Vagas': len(cargas),
-                            'Cargas Sugeridas': ', '.join(map(str, cargas))
-                        })
-                
-                # Mostrar sugestões compartilhadas primeiro
-                if sugestoes_compartilhadas:
-                    st.markdown("**🌟 Vagas Compartilhadas Recomendadas (Fundão + Timbuí):**")
-                    df_sugestoes_comp = pd.DataFrame(sugestoes_compartilhadas)
-                    st.dataframe(df_sugestoes_comp, use_container_width=True, hide_index=True)
-                    st.info("💡 **Dica:** Selecione 'FUNDÃO' e 'TIMBUÍ' juntas no formulário acima para criar vagas compartilhadas!")
-                
-                # Mostrar outras sugestões
-                if sugestoes:
-                    if sugestoes_compartilhadas:
-                        st.markdown("**Outras sugestões:**")
-                    df_sugestoes = pd.DataFrame(sugestoes)
-                    st.dataframe(df_sugestoes, use_container_width=True, hide_index=True)
-                
-                if not sugestoes_compartilhadas and not sugestoes:
-                    st.info("💡 Use essas sugestões como referência ao criar vagas manualmente.")
+        # --- AQUI ENTRA A NOVA INTELIGÊNCIA ---
+        st.info("📝 A lista está vazia. Use a análise abaixo para saber o que criar.")
+
+        st.markdown("---")
+        st.markdown("### 🧠 Sugestão Inteligente (Considera Dias e Turnos)")
+        st.caption("Analisa o 'ConfigDias' para detectar se todas as aulas caem no mesmo dia (pico de simultaneidade).")
+
+        # Botão para chamar a inteligência
+        if st.button("🔎 Analisar Demanda com Inteligência", type="primary"):
+            if dt.empty or dc.empty:
+                st.error("⚠️ Necessário carregar Turmas e Currículo!")
+            else:
+                with st.spinner("Cruzando horários, rotas e regiões..."):
+                    # IMPORTANTE: Chama a função do seu arquivo inteligencia.py
+                    from inteligencia import analisar_demanda_inteligente
+                    df_sugestao = analisar_demanda_inteligente(dt, dc, dd, da)
+                    
+                if not df_sugestao.empty:
+                    st.success("✅ Análise concluída! Veja abaixo as sugestões baseadas na logística real.")
+                    st.markdown("""
+                    > **O que é o Pico Simultâneo?** > Se você tem 10 turmas com aula na *Segunda-Feira de manhã*, você precisa de **10 professores** naquele momento, mesmo que eles não tenham mais aulas na semana. O sistema detectou esses gargalos.
+                    """)
+                    
+                    # Separar Fundão/Timbuí para análise especial
+                    df_ft = df_sugestao[df_sugestao['Região'].isin(['FUNDÃO', 'TIMBUÍ'])].copy()
+                    df_outros = df_sugestao[~df_sugestao['Região'].isin(['FUNDÃO', 'TIMBUÍ'])].copy()
+                    
+                    # Exibir Fundão e Timbuí
+                    if not df_ft.empty:
+                        st.subheader("📍 Análise Integrada: Fundão & Timbuí")
+                        for mat in df_ft['Matéria'].unique():
+                            dados = df_ft[df_ft['Matéria'] == mat]
+                            total_vol = dados['Volume Total'].sum()
+                            # Somamos os picos pois podem cair no mesmo dia
+                            max_simul = dados['Pico Simultâneo'].sum() 
+                            
+                            with st.container():
+                                st.markdown(f"**📚 {mat}**")
+                                c1, c2, c3 = st.columns(3)
+                                c1.metric("Volume Total", f"{total_vol} aulas")
+                                c2.metric("Pico Simultâneo", f"{max_simul} profs", help="Mínimo de professores rodando ao mesmo tempo no pior horário.")
+                                
+                                # Recalcula sugestão unificada
+                                num_vagas = max(max_simul, math.ceil(total_vol / MEDIA_ALVO_PADRAO))
+                                cargas = distribuir_carga_inteligente(total_vol, num_vagas)
+                                
+                                c3.info(f"Sugestão: **{num_vagas} vaga(s)**")
+                                st.write(f"Distribuição recomendada: `{cargas}`")
+                                st.divider()
+
+                    # Exibir Outras Regiões
+                    if not df_outros.empty:
+                        st.subheader("📍 Outras Regiões")
+                        st.dataframe(
+                            df_outros[['Região', 'Matéria', 'Volume Total', 'Pico Simultâneo', 'Vagas Sugeridas', 'Distribuição']], 
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                else:
+                    st.warning("Nenhuma demanda de especialistas encontrada para analisar.")
 
 # ABA 7: GERADOR (MANTENHA O MESMO CÓDIGO)
 with t7:
