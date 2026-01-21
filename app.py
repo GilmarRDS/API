@@ -2169,288 +2169,314 @@ with t7:
     else:
         st.warning("⚠️ Configure a conexão com Google Sheets primeiro.")
 
-# ABA 8: VER HORÁRIO (MANTENHA O MESMO CÓDIGO)
+# ==========================================
+# ABA 8: VER HORÁRIO (COM OPÇÕES DE VISUALIZAÇÃO)
+# ==========================================
 with t8:
     if dh.empty: 
         st.info("✨ Nenhum horário gerado ainda. Vá na aba '🚀 Gerador' para criar a primeira grade da rede.")
     else:
         st.markdown("### 📅 Visualização da Grade Consolidada")
         
+        # --- 1. CONFIGURAÇÃO DE VISUALIZAÇÃO ---
         with st.container():
+            st.markdown("#### 👁️ Configurar Exibição")
+            
+            # Criar dicionários para tradução rápida (Lookup)
+            # Transforma as colunas do cadastro de professores em dicionários {CÓDIGO: VALOR}
+            map_nome = dict(zip(dp['CÓDIGO'], dp['NOME']))
+            map_comp = dict(zip(dp['CÓDIGO'], dp['COMPONENTES']))
+            
+            # Opções de visualização
+            opcoes_vis = ["Apenas Código", "Nome do Professor", "Matéria/Componente", "Nome + Matéria", "Código + Nome"]
+            modo_vis = st.radio("O que deve aparecer na célula da aula?", opcoes_vis, horizontal=True)
+            
+            st.divider()
+
+            # Função local para traduzir o código baseado na escolha
+            def formatar_celula(codigo):
+                if not codigo or codigo == "---": return "---"
+                
+                # Busca dados nos mapas (se não achar, retorna o próprio código)
+                nome = map_nome.get(codigo, codigo)
+                mat = map_comp.get(codigo, "?")
+                
+                if modo_vis == "Apenas Código": return codigo
+                if modo_vis == "Nome do Professor": return nome.split()[0] + " " + nome.split()[-1] if len(nome.split()) > 1 else nome # Primeiro e Último nome
+                if modo_vis == "Matéria/Componente": return mat
+                if modo_vis == "Nome + Matéria": return f"{nome} ({mat})"
+                if modo_vis == "Código + Nome": return f"{codigo} - {nome}"
+                return codigo
+
+            # --- 2. FILTROS GERAIS ---
             c1, c2, c3 = st.columns([2, 2, 1])
             with c1:
-                esc_sel = st.selectbox("🏢 Selecione a Escola", ["Todas as Escolas"] + sorted(dh['ESCOLA'].unique().tolist()))
+                esc_sel = st.selectbox("🏢 Selecione a Escola", ["Todas as Escolas"] + sorted(dh['ESCOLA'].unique().tolist()), key="view_esc")
             with c2:
-                dia_sel = st.selectbox("📆 Selecione o Dia", ["Todos os Dias"] + sorted(dh['DIA'].unique().tolist()))
+                dia_sel = st.selectbox("📆 Selecione o Dia", ["Todos os Dias"] + sorted(dh['DIA'].unique().tolist()), key="view_dia")
             with c3:
-                st.write("")
-                buf = io.BytesIO()
-                df_exp = dh.copy()
-                if esc_sel != "Todas as Escolas": df_exp = df_exp[df_exp['ESCOLA'] == esc_sel]
-                if dia_sel != "Todos os Dias": df_exp = df_exp[df_exp['DIA'] == dia_sel]
-                
-                with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                    for esc in df_exp['ESCOLA'].unique():
-                        df_esc = df_exp[df_exp['ESCOLA'] == esc]
-                        dados_xls = []
-                        for turno_dia in df_esc[['TURNO', 'DIA']].drop_duplicates().values:
-                            t, d = turno_dia
-                            df_bloco = df_esc[(df_esc['TURNO'] == t) & (df_esc['DIA'] == d)]
-                            grade_visual = df_bloco.set_index('TURMA')[['1ª', '2ª', '3ª', '4ª', '5ª']].T
-                            dados_xls.append((f"{t}-{d}", grade_visual))
-                        desenhar_xls(writer, esc, dados_xls)
-                
-                st.download_button(
-                    label="📥 Baixar Excel",
-                    data=buf.getvalue(),
-                    file_name=f"Horario_{esc_sel}_{datetime.now().strftime('%d_%m')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    type="primary"
-                )
+                # Botão de Excel (gera com a visualização escolhida ou raw?)
+                # Por padrão, Excel costuma ser melhor com o Código ou Nome Completo. 
+                # Aqui vamos manter o código no Excel para ser 'oficial', mas visualmente na tela muda.
+                pass
 
-        st.markdown("---")
-        df_view = dh.copy()
-        if esc_sel != "Todas as Escolas": df_view = df_view[df_view['ESCOLA'] == esc_sel]
-        if dia_sel != "Todos os Dias": df_view = df_view[df_view['DIA'] == dia_sel]
+            # --- 3. EXIBIÇÃO DA GRADE ---
+            st.markdown("---")
+            
+            # Filtrar DataFrame principal
+            df_view = dh.copy()
+            if esc_sel != "Todas as Escolas": df_view = df_view[df_view['ESCOLA'] == esc_sel]
+            if dia_sel != "Todos os Dias": df_view = df_view[df_view['DIA'] == dia_sel]
 
-        if df_view.empty:
-            st.warning("Nenhum dado encontrado para os filtros selecionados.")
-        else:
-            def style_grade(df):
-                def color_vagas(val):
-                    if 'VAGA' in str(val): return 'background-color: #ffebee; color: #c62828; font-weight: bold; border: 1px solid #ffcdd2'
-                    if val == '---': return 'color: #d1d1d1; background-color: #fafafa'
-                    return 'background-color: #ffffff; color: #2c3e50; font-weight: 500'
-                
-                return df.style.applymap(color_vagas).set_properties(**{
-                    'text-align': 'center',
-                    'font-size': '14px',
-                    'border': '1px solid #eee'
-                })
+            if df_view.empty:
+                st.warning("Nenhum dado encontrado para os filtros selecionados.")
+            else:
+                # Estilização CSS para a tabela ficar bonita
+                def style_grade(df):
+                    return df.style.set_properties(**{
+                        'text-align': 'center',
+                        'font-size': '14px',
+                        'border': '1px solid #eee',
+                        'white-space': 'pre-wrap' # Permite quebra de linha se o texto for longo
+                    })
 
-            for escola in sorted(df_view['ESCOLA'].unique()):
-                st.markdown(f"""
-                <div style="background-color: #2c3e50; padding: 10px; border-radius: 10px 10px 0 0; margin-top: 20px;">
-                    <h2 style="color: white; margin: 0; text-align: center; font-size: 22px;">🏫 {escola}</h2>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                df_esc = df_view[df_view['ESCOLA'] == escola]
-                
-                for dia in DIAS_SEMANA:
-                    df_dia = df_esc[df_esc['DIA'] == dia]
-                    if df_dia.empty: continue
+                # Loop por Escola
+                for escola in sorted(df_view['ESCOLA'].unique()):
+                    st.markdown(f"""
+                    <div style="background-color: #2c3e50; padding: 10px; border-radius: 10px 10px 0 0; margin-top: 20px;">
+                        <h2 style="color: white; margin: 0; text-align: center; font-size: 20px;">🏫 {escola}</h2>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
-                    st.markdown(f"<h3 style='border-bottom: 2px solid #2c3e50; padding-top: 15px;'>📅 {dia}</h3>", unsafe_allow_html=True)
+                    df_esc = df_view[df_view['ESCOLA'] == escola]
                     
-                    for turno in sorted(df_dia['TURNO'].unique()):
-                        df_turno = df_dia[df_dia['TURNO'] == turno]
+                    # Loop por Dia
+                    dias_para_mostrar = [dia_sel] if dia_sel != "Todos os Dias" else DIAS_SEMANA
+                    
+                    for dia in dias_para_mostrar:
+                        df_dia = df_esc[df_esc['DIA'] == dia]
+                        if df_dia.empty: continue
                         
-                        turmas = sorted(df_turno['TURMA'].unique())
-                        cols = st.columns(min(len(turmas), 3))
+                        st.markdown(f"<h4 style='border-bottom: 2px solid #ddd; padding-top: 10px; color: #555;'>📅 {dia}</h4>", unsafe_allow_html=True)
                         
-                        for idx, turma in enumerate(turmas):
-                            with cols[idx % 3]:
-                                st.markdown(f"""
-                                <div style="background-color: #f1f3f4; padding: 5px 10px; border-radius: 5px; border-left: 5px solid #3498db; margin-bottom: 5px;">
-                                    <span style="font-weight: bold; color: #34495e;">👥 Turma: {turma}</span> | 
-                                    <span style="color: #7f8c8d; font-size: 12px;">☀️ {turno}</span>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                df_turma = df_turno[df_turno['TURMA'] == turma][['1ª', '2ª', '3ª', '4ª', '5ª']]
-                                df_final = df_turma.T
-                                df_final.columns = ["Professor"]
-                                
-                                st.table(style_grade(df_final))
-                st.markdown("---")
-                # ==========================================
+                        # Loop por Turno
+                        for turno in sorted(df_dia['TURNO'].unique()):
+                            st.caption(f"☀️ Turno: {turno}")
+                            
+                            df_turno = df_dia[df_dia['TURNO'] == turno]
+                            
+                            # Preparar Tabela Visual (Turma x Aulas)
+                            # 1. Pegamos apenas as colunas de aula
+                            tabela_visual = df_turno[['TURMA', '1ª', '2ª', '3ª', '4ª', '5ª']].set_index('TURMA')
+                            
+                            # 2. APLICAMOS A FORMATAÇÃO ESCOLHIDA (TRADUÇÃO)
+                            # O applymap roda a função 'formatar_celula' em CADA célula da tabela
+                            tabela_visual = tabela_visual.applymap(formatar_celula)
+                            
+                            # Exibir
+                            st.table(style_grade(tabela_visual))
 # ==========================================
-# ABA 9: EDITOR MANUAL (COM FILTRO DE DIAS DE AULA)
+# ==========================================
+# ABA 9: EDITOR MANUAL (LAYOUT EM CARDS VISUAIS)
 # ==========================================
 with t9:
-    st.markdown("### ✏️ Montagem Manual de Horário")
-    st.info("O sistema mostrará apenas as turmas que têm aula de especialista no dia selecionado (baseado na aba '⚙️ Config').")
+    st.markdown("### ✏️ Montagem Manual (Visual)")
+    st.info("Layout visual por turmas. Selecione o professor em cada horário.")
 
     if dt.empty:
-        st.warning("⚠️ Você precisa cadastrar TURMAS na aba '🏫 Turmas' antes de montar o horário.")
+        st.warning("⚠️ Cadastre turmas na aba '🏫 Turmas' primeiro.")
     else:
         # --- 1. FILTROS ---
         c1, c2, c3 = st.columns(3)
         with c1:
             escolas_disp = sorted(dt['ESCOLA'].unique())
-            esc_man = st.selectbox("🏢 Escola", escolas_disp, key="man_esc")
+            esc_man = st.selectbox("🏢 Escola", escolas_disp, key="man_esc_vis")
         
         with c2:
             dias_ordem = {d: i for i, d in enumerate(DIAS_SEMANA)}
             dias_disp = sorted(DIAS_SEMANA, key=lambda x: dias_ordem.get(x, 99))
-            dia_man = st.selectbox("📅 Dia da Semana", dias_disp, key="man_dia")
+            dia_man = st.selectbox("📅 Dia", dias_disp, key="man_dia_vis")
             
         with c3:
             turnos_disp = dt[dt['ESCOLA'] == esc_man]['TURNO'].unique()
             if len(turnos_disp) > 0:
-                turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="man_turno")
+                turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="man_turno_vis")
             else:
                 turno_man = None
-                st.warning("Escola sem turmas cadastradas.")
+                st.warning("Sem turmas.")
 
-        # --- 2. ÁREA DE EDIÇÃO ---
+        # --- 2. ÁREA DE EDIÇÃO VISUAL ---
         if turno_man:
             st.divider()
-            st.markdown(f"#### 📝 Editando: {esc_man} | {dia_man} | {turno_man}")
             
-            # Identificar Região da Escola
-            regiao_escola = dt[dt['ESCOLA'] == esc_man].iloc[0]['REGIÃO']
-            st.caption(f"📍 Região da Escola: **{regiao_escola}**")
+            # Estilo CSS para parecer cards
+            st.markdown("""
+            <style>
+            div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] > div[data-testid="stVerticalBlock"] {
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                padding: 15px;
+                background-color: #f9f9f9;
+            }
+            </style>
+            """, unsafe_allow_html=True)
 
-            # --- A. LÓGICA DE FILTRAGEM DE TURMAS (NOVO!) ---
-            # 1. Pegar todas as turmas dessa escola/turno
+            # A. Identificar turmas e Região
+            regiao_escola = dt[dt['ESCOLA'] == esc_man].iloc[0]['REGIÃO']
+            st.caption(f"📍 Região: **{regiao_escola}**")
+            
+            # Filtragem inteligente de turmas (Baseada no ConfigDias)
             df_turmas_base = dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]
-            
             turmas_filtradas = []
-            
-            # 2. Verificar no ConfigDias se a turma deve aparecer HOJE
             for _, row in df_turmas_base.iterrows():
-                serie = row['SÉRIE/ANO']
-                turma_nome = row['TURMA']
-                
-                # Buscar configuração dessa série
-                config_serie = dd[dd['SÉRIE/ANO'] == serie]
-                
+                config_serie = dd[dd['SÉRIE/ANO'] == row['SÉRIE/ANO']]
                 if not config_serie.empty:
-                    # Se tem configuração, verificamos se o dia bate
-                    dias_permitidos = config_serie['DIA_PLANEJAMENTO'].unique()
-                    if dia_man in dias_permitidos:
-                        turmas_filtradas.append(turma_nome)
+                    if dia_man in config_serie['DIA_PLANEJAMENTO'].unique():
+                        turmas_filtradas.append(row['TURMA'])
                 else:
-                    # Se NÃO tem configuração (ex: esqueceu de configurar), mostramos a turma por segurança
-                    turmas_filtradas.append(turma_nome)
+                    turmas_filtradas.append(row['TURMA']) # Mostra se não tiver config
             
             turmas_alvo = sorted(list(set(turmas_filtradas)))
-            
+
             if not turmas_alvo:
-                st.info(f"🚫 Nenhuma turma desta escola tem aula configurada para **{dia_man}** na aba Config.")
+                st.info(f"🚫 Nenhuma turma configurada para {dia_man}.")
             else:
-                # --- B. Buscar dados existentes ---
+                # B. Carregar dados existentes
+                horario_existente = {} # {Turma: {1: Prof, 2: Prof...}}
                 if not dh.empty:
-                    mask_existente = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
-                    # Filtramos também para trazer apenas as turmas alvo
-                    df_recorte = dh[mask_existente & dh['TURMA'].isin(turmas_alvo)].copy()
-                else:
-                    df_recorte = pd.DataFrame()
+                    mask = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
+                    df_recorte = dh[mask]
+                    for _, row in df_recorte.iterrows():
+                        horario_existente[row['TURMA']] = {
+                            "1ª": row['1ª'], "2ª": row['2ª'], "3ª": row['3ª'], "4ª": row['4ª'], "5ª": row['5ª']
+                        }
 
-                # --- C. Esqueleto Completo (Apenas turmas do dia) ---
-                esqueleto = pd.DataFrame({
-                    'ESCOLA': [esc_man] * len(turmas_alvo),
-                    'TURMA': turmas_alvo,
-                    'TURNO': [turno_man] * len(turmas_alvo),
-                    'DIA': [dia_man] * len(turmas_alvo),
-                    '1ª': ["---"] * len(turmas_alvo),
-                    '2ª': ["---"] * len(turmas_alvo),
-                    '3ª': ["---"] * len(turmas_alvo),
-                    '4ª': ["---"] * len(turmas_alvo),
-                    '5ª': ["---"] * len(turmas_alvo)
-                })
-
-                if not df_recorte.empty:
-                    esqueleto = esqueleto[~esqueleto['TURMA'].isin(df_recorte['TURMA'])]
-                    df_final_editor = pd.concat([df_recorte, esqueleto], ignore_index=True)
-                else:
-                    df_final_editor = esqueleto
-
-                df_final_editor = df_final_editor.sort_values('TURMA').reset_index(drop=True)
-
-                # --- D. Configurar Editor ---
+                # C. Preparar Lista de Professores
                 lista_profs = ["---"] + sorted(dp['CÓDIGO'].unique().tolist())
+
+                # D. GERAR CARDS (3 Colunas)
+                cols_layout = st.columns(3)
                 
-                col_config = {
-                    "ESCOLA": None, "TURNO": None, "DIA": None,
-                    "TURMA": st.column_config.TextColumn("Turma", disabled=True, width="small"),
-                    "1ª": st.column_config.SelectboxColumn("1ª Aula", options=lista_profs, width="medium", required=True),
-                    "2ª": st.column_config.SelectboxColumn("2ª Aula", options=lista_profs, width="medium", required=True),
-                    "3ª": st.column_config.SelectboxColumn("3ª Aula", options=lista_profs, width="medium", required=True),
-                    "4ª": st.column_config.SelectboxColumn("4ª Aula", options=lista_profs, width="medium", required=True),
-                    "5ª": st.column_config.SelectboxColumn("5ª Aula", options=lista_profs, width="medium", required=True),
-                }
+                # Dicionário para guardar as escolhas do usuário
+                escolhas_usuario = {} # { (Turma, Slot): Prof_Codigo }
 
-                df_editado = st.data_editor(
-                    df_final_editor,
-                    column_config=col_config,
-                    hide_index=True,
-                    use_container_width=True,
-                    key=f"editor_{esc_man}_{dia_man}_{turno_man}",
-                    num_rows="fixed"
-                )
+                for i, turma in enumerate(turmas_alvo):
+                    col_atual = cols_layout[i % 3] # Distribui: 0,1,2, 0,1,2...
+                    
+                    with col_atual:
+                        st.markdown(f"##### 👥 {turma}")
+                        st.markdown("---")
+                        
+                        # Criar 5 Selectboxes para as 5 aulas
+                        for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                            # Valor atual (do banco ou vazio)
+                            val_atual = "---"
+                            if turma in horario_existente and slot in horario_existente[turma]:
+                                val_atual = horario_existente[turma][slot]
+                                if val_atual not in lista_profs: val_atual = "---" # Segurança
+                            
+                            # O índice na lista
+                            idx_atual = lista_profs.index(val_atual)
+                            
+                            # Chave única para o widget
+                            key_widget = f"sel_{esc_man}_{dia_man}_{turno_man}_{turma}_{slot}"
+                            
+                            # O Widget
+                            escolha = st.selectbox(
+                                f"{slot} Aula", 
+                                options=lista_profs, 
+                                index=idx_atual,
+                                key=key_widget,
+                                label_visibility="collapsed" # Esconde o label "1ª Aula" pra ficar limpo, usamos placeholder se quiser
+                            )
+                            # Pequeno texto indicando qual aula é (já que escondemos o label)
+                            st.caption(f"👆 {slot} Aula")
+                            
+                            # Guardar na memória para salvar depois
+                            escolhas_usuario[(turma, slot)] = escolha
 
-                # --- 3. BOTÃO DE SALVAR ---
-                st.write("")
-                col_btn, col_info = st.columns([1, 2])
-                
-                with col_btn:
-                    salvar = st.button("💾 Validar e Salvar Grade", type="primary", use_container_width=True)
-                
-                with col_info:
-                    if salvar:
-                        if not sistema_seguro:
-                            st.error("Sem conexão segura com Google Sheets.")
-                        else:
-                            conflitos = []
-                            with st.spinner("🔍 Validando Regras..."):
-                                
-                                # Preparar dados para validação de horário
-                                if not dh.empty:
-                                    mask_atual = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
-                                    df_resto_rede = dh[~mask_atual].copy()
-                                    df_conflito_horario = df_resto_rede[df_resto_rede['DIA'] == dia_man]
-                                else:
-                                    df_conflito_horario = pd.DataFrame()
-
-                                slots = ['1ª', '2ª', '3ª', '4ª', '5ª']
-
-                                for idx, row in df_editado.iterrows():
-                                    turma_atual = row['TURMA']
-                                    for slot in slots:
-                                        prof = row[slot]
-                                        if prof == "---" or not prof: continue
-
-                                        # 1. Região
-                                        dados_prof = dp[dp['CÓDIGO'] == prof]
-                                        if not dados_prof.empty:
-                                            regiao_prof = dados_prof.iloc[0]['REGIÃO']
-                                            compativel = False
-                                            if regiao_prof == regiao_escola: compativel = True
-                                            elif (regiao_prof in ["FUNDÃO", "TIMBUÍ"]) and (regiao_escola in ["FUNDÃO", "TIMBUÍ"]): compativel = True
-                                            
-                                            if not compativel:
-                                                conflitos.append(f"🌍 **Erro de Região:** {prof} ({regiao_prof}) na escola de {regiao_escola}.")
-
-                                        # 2. Conflito Interno
-                                        if df_editado[df_editado[slot] == prof].shape[0] > 1:
-                                            conflitos.append(f"❌ **Conflito Interno:** {prof} duplicado na {slot} aula.")
-
-                                        # 3. Conflito Externo
-                                        if not df_conflito_horario.empty:
-                                            ocupacao = df_conflito_horario[df_conflito_horario[slot] == prof]
-                                            for _, c in ocupacao.iterrows():
-                                                conflitos.append(f"⛔ **Já trabalha:** {prof} está na {c['ESCOLA']} ({c['TURMA']}) na {slot} aula.")
-
-                            if conflitos:
-                                st.error(f"Erros encontrados: {len(set(conflitos))}")
-                                for c in sorted(list(set(conflitos))): st.write(c)
+                # --- 3. BOTÃO SALVAR (AGORA FORA DO LOOP) ---
+                st.divider()
+                if st.button("💾 Validar e Salvar Grade Visual", type="primary", use_container_width=True):
+                    if not sistema_seguro:
+                        st.error("Sem conexão.")
+                    else:
+                        conflitos = []
+                        novas_linhas = []
+                        
+                        with st.spinner("Analisando grade visual..."):
+                            # Preparar Validação Externa
+                            if not dh.empty:
+                                mask_atual = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
+                                df_resto = dh[~mask_atual]
+                                df_conflito_horario = df_resto[df_resto['DIA'] == dia_man]
                             else:
-                                with st.spinner("☁️ Salvando..."):
-                                    if not dh.empty:
-                                        # Remove APENAS as turmas que estamos editando deste dia
-                                        # (Mantém outras turmas da mesma escola se elas não apareceram na lista por causa do filtro)
-                                        mask_atual = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man) & (dh['TURMA'].isin(turmas_alvo))
-                                        dh = dh[~mask_atual]
-                                    
-                                    dh = pd.concat([dh, df_editado], ignore_index=True)
-                                    salvar_seguro(dt, dc, dp, dd, da, dh)
-                                    st.success("✅ Salvo!")
-                                    time.sleep(1)
-                                    st.rerun()
+                                df_conflito_horario = pd.DataFrame()
+
+                            # Processar escolhas
+                            for turma in turmas_alvo:
+                                linha_dados = {
+                                    "ESCOLA": esc_man, "TURMA": turma, "TURNO": turno_man, "DIA": dia_man,
+                                    "1ª": escolhas_usuario.get((turma, "1ª"), "---"),
+                                    "2ª": escolhas_usuario.get((turma, "2ª"), "---"),
+                                    "3ª": escolhas_usuario.get((turma, "3ª"), "---"),
+                                    "4ª": escolhas_usuario.get((turma, "4ª"), "---"),
+                                    "5ª": escolhas_usuario.get((turma, "5ª"), "---"),
+                                }
+                                novas_linhas.append(linha_dados)
+
+                                # Validar cada slot dessa turma
+                                for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                                    prof = linha_dados[slot]
+                                    if prof == "---": continue
+
+                                    # 1. Região
+                                    dados_prof = dp[dp['CÓDIGO'] == prof]
+                                    if not dados_prof.empty:
+                                        regiao_prof = dados_prof.iloc[0]['REGIÃO']
+                                        compativel = (regiao_prof == regiao_escola) or \
+                                                     (regiao_prof in ["FUNDÃO", "TIMBUÍ"] and regiao_escola in ["FUNDÃO", "TIMBUÍ"])
+                                        if not compativel:
+                                            conflitos.append(f"🌍 **Região:** {prof} ({regiao_prof}) na escola de {regiao_escola}.")
+
+                                    # 2. Conflito Interno (Mesmo prof em 2 turmas nesta tela)
+                                    # Conta quantas vezes o prof aparece neste slot nas ESCOLHAS ATUAIS
+                                    uso_interno = 0
+                                    for t_check in turmas_alvo:
+                                        if escolhas_usuario.get((t_check, slot)) == prof:
+                                            uso_interno += 1
+                                    if uso_interno > 1:
+                                        conflitos.append(f"❌ **Duplicado:** {prof} em {uso_interno} turmas na {slot} aula.")
+
+                                    # 3. Conflito Externo
+                                    if not df_conflito_horario.empty:
+                                        ocup = df_conflito_horario[df_conflito_horario[slot] == prof]
+                                        for _, c in ocup.iterrows():
+                                            conflitos.append(f"⛔ **Já alocado:** {prof} na {c['ESCOLA']} ({c['TURMA']}) - {slot} aula.")
+
+                        # Decisão
+                        if conflitos:
+                            # Filtra duplicatas para não poluir
+                            conflitos = sorted(list(set(conflitos)))
+                            st.error(f"Encontrados {len(conflitos)} problemas:")
+                            for c in conflitos: st.write(c)
+                        else:
+                            # Salvar
+                            with st.spinner("Salvando alterações..."):
+                                df_novas = pd.DataFrame(novas_linhas)
+                                
+                                if not dh.empty:
+                                    # Remove dados antigos dessa combinação
+                                    mask_rm = (dh['ESCOLA'] == esc_man) & (dh['DIA'] == dia_man) & (dh['TURNO'] == turno_man)
+                                    # Cuidado: só remove as turmas que estamos editando (caso haja filtro)
+                                    mask_rm = mask_rm & (dh['TURMA'].isin(turmas_alvo))
+                                    dh = dh[~mask_rm]
+                                
+                                dh = pd.concat([dh, df_novas], ignore_index=True)
+                                salvar_seguro(dt, dc, dp, dd, da, dh)
+                                st.success("✅ Horário Visual Salvo com Sucesso!")
+                                time.sleep(1)
+                                st.rerun()
 
             with st.expander("🕵️‍♀️ Ver Lista de Professores"):
                 st.dataframe(dp[['CÓDIGO', 'NOME', 'COMPONENTES', 'REGIÃO']], use_container_width=True, hide_index=True)
