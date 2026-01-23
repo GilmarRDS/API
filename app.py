@@ -1374,70 +1374,195 @@ t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
 ])
 
 # ==========================================
-# RESTANTE DO CÓDIGO DAS ABAS (MANTENHA O MESMO)
+# ABA 1: DASHBOARD GERENCIAL (COMPLETO)
 # ==========================================
-# ABA 1: DASHBOARD
 with t1:
-    if dt.empty: 
-        st.info("📝 Cadastre turmas na aba '🏫 Turmas'.")
+    if dt.empty or dc.empty:
+        st.info("📝 O Dashboard ficará ativo assim que você cadastrar Turmas e Currículo.")
     else:
-        # Cálculo REAL da demanda
-        total_aulas_especialistas = 0
-        for _, turma in dt.iterrows():
-            curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
+        st.markdown("### 📊 Visão Geral da Rede")
+
+        # --- 1. FILTROS GLOBAIS ---
+        c_f1, c_f2, c_f3 = st.columns(3)
+        with c_f1: 
+            regioes_disp = sorted(dt['REGIÃO'].unique())
+            filtro_regiao = st.multiselect("🌍 Região", regioes_disp, default=regioes_disp)
+        with c_f2:
+            if filtro_regiao:
+                opcoes_escolas = dt[dt['REGIÃO'].isin(filtro_regiao)]['ESCOLA'].unique()
+            else:
+                opcoes_escolas = dt['ESCOLA'].unique()
+            filtro_escola = st.selectbox("🏢 Escola", ["Todas"] + sorted(list(opcoes_escolas)))
+        with c_f3:
+            filtro_materia = st.selectbox("📚 Matéria", ["Todas"] + MATERIAS_ESPECIALISTAS)
+
+        # =========================================================
+        # 2. CÁLCULO DE DEMANDA (NECESSIDADE)
+        # =========================================================
+        df_turmas_filt = dt.copy()
+        if filtro_regiao: 
+            df_turmas_filt = df_turmas_filt[df_turmas_filt['REGIÃO'].isin(filtro_regiao)]
+        if filtro_escola != "Todas": 
+            df_turmas_filt = df_turmas_filt[df_turmas_filt['ESCOLA'] == filtro_escola]
+
+        demanda_por_materia = {}
+        total_aulas_demanda = 0
+        auditoria_demanda = []
+
+        for _, row in df_turmas_filt.iterrows():
+            serie = row['SÉRIE/ANO']
+            turma_nome = row['TURMA']
+            escola_nome = row['ESCOLA']
+            
+            curr = dc[dc['SÉRIE/ANO'] == serie]
+            
             for _, item in curr.iterrows():
-                if padronizar_materia_interna(item['COMPONENTE']) in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                    total_aulas_especialistas += int(item['QTD_AULAS'])
+                mat_nome = padronizar_materia_interna(item['COMPONENTE'])
+                if mat_nome in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
+                    if filtro_materia == "Todas" or padronizar_materia_interna(filtro_materia) == mat_nome:
+                        qtd = int(item['QTD_AULAS'])
+                        demanda_por_materia[mat_nome] = demanda_por_materia.get(mat_nome, 0) + qtd
+                        total_aulas_demanda += qtd
+                        auditoria_demanda.append(f"📌 {escola_nome} - {turma_nome}: +{qtd} {mat_nome}")
+
+        # =========================================================
+        # 3. CÁLCULO DE OFERTA (PROFESSORES)
+        # =========================================================
+        df_profs_filt = dp.copy()
         
-        st.info(f"📊 **Demanda Real:** {total_aulas_especialistas} aulas semanais de especialistas")
+        # Filtro de Região
+        if filtro_regiao: 
+            df_profs_filt = df_profs_filt[df_profs_filt['REGIÃO'].isin(filtro_regiao)]
+            
+        # Filtro de Escola (Lógica: Professor está alocado nesta escola?)
+        if filtro_escola != "Todas":
+            esc_alvo_norm = padronizar(filtro_escola)
+            def checar_escola(escolas_str):
+                if pd.isna(escolas_str) or escolas_str == "": return False 
+                # Separa a lista de escolas do professor e verifica
+                escolas_prof = [padronizar(e.strip()) for e in str(escolas_str).split(',')]
+                return esc_alvo_norm in escolas_prof
+
+            df_profs_filt = df_profs_filt[df_profs_filt['ESCOLAS_ALOCADAS'].apply(checar_escola)]
+
+        oferta_por_materia = {}
+        total_aulas_oferta = 0
+        auditoria_oferta = []
+
+        for _, row in df_profs_filt.iterrows():
+            nome_prof = row['NOME']
+            cod_prof = row['CÓDIGO']
+            # Pega as matérias que esse professor dá
+            comps = [padronizar_materia_interna(c.strip()) for c in str(row['COMPONENTES']).split(',')]
+            
+            # --- CÁLCULO DE AULAS ---
+            # Lê diretamente a coluna CARGA_HORÁRIA como sendo a quantidade de aulas
+            carga_aulas = int(row['CARGA_HORÁRIA'])
+            
+            # Filtra apenas especialistas
+            mats_validas = [c for c in comps if c in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]]
+            
+            if mats_validas:
+                # Se der mais de uma matéria, divide. Se der só uma, pega tudo.
+                carga_por_mat = carga_aulas / len(mats_validas)
+                
+                for c in mats_validas:
+                    if filtro_materia == "Todas" or padronizar_materia_interna(filtro_materia) == c:
+                        oferta_por_materia[c] = oferta_por_materia.get(c, 0) + carga_por_mat
+                        total_aulas_oferta += carga_por_mat
+                        
+                        auditoria_oferta.append(f"👨‍🏫 {cod_prof} ({nome_prof}): Dispõe de {carga_por_mat:.1f} aulas de {c}")
+
+        # --- 4. EXIBIÇÃO DOS INDICADORES ---
+        st.divider()
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Turmas Analisadas", len(df_turmas_filt))
+        k2.metric("Demanda (Necessidade)", total_aulas_demanda)
+        k3.metric("Oferta (Professores)", int(total_aulas_oferta))
         
-        c1,c2,c3,c4,c5 = st.columns(5)
-        with c1: sel_regiao = st.multiselect("🌍 Região", sorted(dt['REGIÃO'].unique()))
-        with c2: 
-            esc_opts = dt[dt['REGIÃO'].isin(sel_regiao)]['ESCOLA'].unique() if sel_regiao else dt['ESCOLA'].unique()
-            sel_escola = st.selectbox("🏢 Escola", ["Rede Completa"] + sorted(list(esc_opts)))
-        with c3: sel_nivel = st.selectbox("👶/👦 Nível", ["Todos"] + sorted(dt['NÍVEL'].unique().tolist()))
-        with c4: sel_serie = st.selectbox("📚 Série", ["Todas"] + ORDEM_SERIES)
-        with c5: sel_turma = st.selectbox("🔠 Turma", ["Todas"] + sorted(dt['TURMA'].unique().tolist()))
-        st.markdown("---")
-        alvo = dt.copy()
-        if sel_regiao: alvo = alvo[alvo['REGIÃO'].isin(sel_regiao)]
-        if sel_escola != "Rede Completa": alvo = alvo[alvo['ESCOLA'] == sel_escola]
-        if sel_nivel != "Todos": alvo = alvo[alvo['NÍVEL'] == sel_nivel]
-        if sel_serie != "Todas": alvo = alvo[alvo['SÉRIE/ANO'] == sel_serie]
-        if sel_turma != "Todas": alvo = alvo[alvo['TURMA'] == sel_turma]
-        dem, oferta = {}, {}
-        tot_dem, tot_of = 0, 0
-        for _, r in alvo.iterrows():
-            curr = dc[dc['SÉRIE/ANO'] == r['SÉRIE/ANO']]
-            for _, i in curr.iterrows():
-                m = limpar_materia(i['COMPONENTE'])
-                qtd = int(i['QTD_AULAS'])
-                dem[m] = dem.get(m, 0) + qtd
-                tot_dem += qtd
-        for _, p in dp.iterrows():
-            if sel_regiao and p['REGIÃO'] not in sel_regiao: continue
-            if p['VÍNCULO'] == 'EFETIVO' and sel_escola != "Rede Completa" and sel_escola not in str(p['ESCOLAS_ALOCADAS']): continue
-            ms = [limpar_materia(x) for x in str(p['COMPONENTES']).split(',')]
-            ch = int(p['CARGA_HORÁRIA'])
-            if ms:
-                rat = ch / len(ms)
-                for m in ms: oferta[m] = oferta.get(m, 0) + rat
-                tot_of += ch
-        c_m, c_r = st.columns([3,1])
-        with c_m:
-            m1,m2,m3,m4 = st.columns(4)
-            m1.metric("Turmas", len(alvo))
-            m2.metric("Demanda", tot_dem)
-            m3.metric("Oferta", int(tot_of))
-            m4.metric("Déficit", max(0, tot_dem - tot_of))
-        with c_r: ch_padrao = st.slider("Média Aulas/Prof", 10, 40, 20)
-        res = []
-        for m, q in dem.items():
-            o = oferta.get(m, 0)
-            s = q-o
-            res.append({"Matéria": m, "Falta": int(s), "Novos": round(s/ch_padrao, 1) if s>0 else 0, "Status": "🔴" if s>0 else "🟢"})
-        st.dataframe(pd.DataFrame(res), use_container_width=True)
+        saldo = int(total_aulas_oferta - total_aulas_demanda)
+        k4.metric("Saldo", saldo, delta_color="normal" if saldo >= 0 else "inverse")
+
+        # --- 5. DETETIVE DE CÁLCULOS (ABRA AQUI PARA CONFERIR) ---
+        with st.expander("🕵️‍♀️ Detetive de Cálculos (Clique para ver de onde vêm os números)"):
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown("**🔍 Detalhe da Demanda (Turmas)**")
+                if auditoria_demanda:
+                    st.text("\n".join(auditoria_demanda[:50])) # Mostra os primeiros 50
+                    if len(auditoria_demanda) > 50: st.caption("... e mais turmas.")
+                else:
+                    st.write("Nenhuma demanda encontrada.")
+            
+            with d2:
+                st.markdown("**🔍 Detalhe da Oferta (Professores)**")
+                if auditoria_oferta:
+                    # AQUI VOCÊ VAI VER O VALOR QUE O SISTEMA ESTÁ LENDO
+                    st.text("\n".join(auditoria_oferta))
+                else:
+                    st.write("Nenhum professor encontrado para esta escola.")
+
+        # --- 6. TABELA DE BALANÇO ---
+        st.subheader("📉 Balanço por Matéria")
+        dados_tabela = []
+        todas_mats = set(list(demanda_por_materia.keys()) + list(oferta_por_materia.keys()))
+        
+        for m in sorted(list(todas_mats)):
+            dem = demanda_por_materia.get(m, 0)
+            ofe = int(oferta_por_materia.get(m, 0))
+            dif = ofe - dem
+            status = "✅ OK" if dif == 0 else (f"🔵 Sobra {dif}" if dif > 0 else f"🔴 Falta {abs(dif)}")
+            
+            dados_tabela.append({
+                "Matéria": m,
+                "Necessidade": dem,
+                "Disponível": ofe,
+                "Saldo": dif,
+                "Status": status
+            })
+        
+        if dados_tabela:
+            st.dataframe(pd.DataFrame(dados_tabela), use_container_width=True, hide_index=True)
+
+        # --- 7. GALERIA VISUAL (RESTAURADA) ---
+        st.divider()
+        st.subheader(f"🎨 Professores Alocados: {filtro_escola}")
+        st.caption("Cores de identificação geradas pelo sistema:")
+
+        if not df_profs_filt.empty:
+            # Ordena para ficar bonito
+            df_profs_filt['MAT_PRINCIPAL'] = df_profs_filt['COMPONENTES'].apply(lambda x: str(x).split(',')[0])
+            df_vis = df_profs_filt.sort_values(by=['MAT_PRINCIPAL', 'NOME'])
+            
+            cols_vis = st.columns(6)
+            for idx, (_, p) in enumerate(df_vis.iterrows()):
+                cod = p['CÓDIGO']
+                # Pega primeiro e último nome
+                nomes = p['NOME'].split()
+                nome_curto = f"{nomes[0]} {nomes[-1]}" if len(nomes) > 1 else nomes[0]
+                
+                # Gera a cor
+                estilo = gerar_estilo_professor_dinamico(cod)
+                
+                with cols_vis[idx % 6]:
+                    st.markdown(f"""
+                    <div style="
+                        background-color: {estilo['bg']}; 
+                        color: {estilo['text']}; 
+                        border: 1px solid {estilo['border']};
+                        border-radius: 6px; 
+                        padding: 8px; 
+                        margin-bottom: 10px;
+                        text-align: center;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    ">
+                        <div style="font-weight: 800; font-size: 13px;">{cod}</div>
+                        <div style="font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{nome_curto}</div>
+                        <div style="font-size: 9px; opacity: 0.9; margin-top: 2px;">{p['COMPONENTES'][:15]}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info("Nenhum professor alocado nesta escola para exibir na galeria.")
 
 # ABA 2: CONFIG (MANTENHA O MESMO CÓDIGO)
 with t2:
@@ -1502,138 +1627,174 @@ with t4:
     dt = st.data_editor(dt, num_rows="dynamic", key="edt")
     botao_salvar("Salvar Turmas", "btur")
 
-# ABA 5: PROFESSORES (MANTENHA O MESMO CÓDIGO)
-
-# ABA 5: PROFESSORES
+# ==========================================
+# ABA 5: GESTÃO DE PROFESSORES (EDIÇÃO COMPLETA)
+# ==========================================
 with t5:
-    # --- 1. ESTATÍSTICAS REAIS ---
-    if not dt.empty and not dc.empty:
-        st.info("📊 **Estatísticas Reais da Rede:**")
-        col1, col2, col3 = st.columns(3)
-        
-        # Calcular demanda real
-        demanda_real = 0
-        for _, turma in dt.iterrows():
-            curr = dc[dc['SÉRIE/ANO'] == turma['SÉRIE/ANO']]
-            for _, item in curr.iterrows():
-                if padronizar_materia_interna(item['COMPONENTE']) in [padronizar_materia_interna(m) for m in MATERIAS_ESPECIALISTAS]:
-                    demanda_real += int(item['QTD_AULAS'])
-        
-        # Calcular oferta real
-        oferta_real = 0
-        for _, prof in dp.iterrows():
-            oferta_real += int(prof['CARGA_HORÁRIA'])
-        
-        with col1:
-            st.metric("Aulas Demanda", demanda_real)
-        with col2:
-            st.metric("Aulas Oferta", oferta_real)
-        with col3:
-            saldo = demanda_real - oferta_real
-            st.metric("Saldo", saldo, delta_color="inverse")
-        
-        if saldo > 0:
-            st.warning(f"⚠️ Déficit de {saldo} aulas! Use a ferramenta abaixo para corrigir.")
-
-    # --- 2. FERRAMENTA INTELIGENTE (CORRIGIDA) ---
-    st.markdown("---")
+    st.markdown("### 👨‍🏫 Gestão do Corpo Docente")
     
-    # Preparar estado para não sumir o resultado
-    if 'resultado_vagas_smart' not in st.session_state:
-        st.session_state['resultado_vagas_smart'] = None
+    # --- 1. PREPARAÇÃO DE DADOS ---
+    if dt.empty:
+        st.warning("⚠️ Cadastre turmas primeiro para carregar a lista de escolas.")
+        lista_escolas = []
+    else:
+        lista_escolas = sorted(dt['ESCOLA'].unique())
+    
+    # --- 2. FILTROS ---
+    with st.container():
+        c1, c2, c3 = st.columns([2, 2, 1])
+        esc_sel = c1.selectbox("Filtrar por Escola", ["Todas as Escolas"] + lista_escolas)
+        busca = c2.text_input("Buscar por Nome ou Código")
+        c3.metric("Total de Professores", len(dp))
 
-    with st.expander("🤖 Ferramenta: Gerar Vagas Automáticas (INTELIGENTE)", expanded=False):
-        st.info("🚀 Esta ferramenta agora considera **Dias de Aula**, **Simultaneidade** e **Rotas**, além do volume total.")
+    # --- 3. TABELA DE SELEÇÃO ---
+    df_show = dp.copy()
+    
+    # Aplica filtros
+    if esc_sel != "Todas as Escolas":
+        alvo = padronizar(esc_sel)
+        df_show = df_show[df_show['ESCOLAS_ALOCADAS'].apply(lambda x: alvo in [padronizar(e.strip()) for e in str(x).split(',')])]
+    
+    if busca:
+        t = padronizar(busca)
+        df_show = df_show[df_show['NOME'].apply(padronizar).str.contains(t) | df_show['CÓDIGO'].str.contains(t.upper())]
+
+    st.info("👇 Marque a caixa **'Editar'** para abrir a ficha completa do professor.")
+    
+    # Coluna de seleção manual (compatível com todas as versões)
+    df_show.insert(0, "Editar", False)
+    
+    # Exibe tabela resumida (apenas para encontrar o professor)
+    df_tabela = st.data_editor(
+        df_show,
+        column_config={
+            "Editar": st.column_config.CheckboxColumn("Selecionar", width="small"),
+            "CÓDIGO": st.column_config.TextColumn("Código", disabled=True),
+            "NOME": st.column_config.TextColumn("Nome", disabled=True),
+            "ESCOLAS_ALOCADAS": st.column_config.TextColumn("Escolas", disabled=True),
+            "COMPONENTES": st.column_config.TextColumn("Matérias", disabled=True),
+        },
+        use_container_width=True,
+        hide_index=True,
+        key="tabela_professores_completa"
+    )
+
+    # --- 4. FICHA COMPLETA DE EDIÇÃO ---
+    selecionados = df_tabela[df_tabela["Editar"] == True]
+
+    if not selecionados.empty:
+        # Pega o primeiro selecionado
+        idx_real = selecionados.index[0]
+        prof = dp.loc[idx_real]
         
-        # Layout das colunas APENAS para o texto e o botão
-        c_rh1, c_btn = st.columns([3,1])
+        st.divider()
+        st.markdown(f"### ✏️ Editando: **{prof['NOME']}** ({prof['CÓDIGO']})")
         
-        with c_rh1: 
-            st.write("**Como funciona:**")
-            st.caption("1. Analisa o 'ConfigDias' para ver quantas turmas têm aula ao mesmo tempo.")
-            st.caption("2. Define o mínimo de professores para cobrir esse pico.")
-            st.caption("3. Cria vagas compartilhadas entre Fundão e Timbuí automaticamente.")
+        with st.form("form_edicao_completa"):
+            # Linha 1: Dados Básicos
+            c_a, c_b, c_c = st.columns([1, 2, 1])
+            nome_ed = c_b.text_input("Nome Completo", value=prof['NOME'])
+            cod_ed = c_a.text_input("Código (ID)", value=prof['CÓDIGO'], disabled=True, help="O código não pode ser alterado.")
             
-        with c_btn:
-            st.write(""); st.write("")
-            # Capturamos o clique aqui
-            processar = st.button("🚀 Calcular e Criar Vagas", use_container_width=True)
+            # Linha 2: Contrato e Localização
+            c_d, c_e, c_f = st.columns(3)
+            
+            # Região
+            reg_atual = prof['REGIÃO'] if prof['REGIÃO'] in REGIOES else REGIOES[0]
+            reg_ed = c_d.selectbox("Região", REGIOES, index=REGIOES.index(reg_atual))
+            
+            # Vínculo
+            vinc_ops = ["DT", "EFETIVO"]
+            vinc_atual = prof['VÍNCULO'] if prof['VÍNCULO'] in vinc_ops else "DT"
+            vinc_ed = c_e.selectbox("Vínculo", vinc_ops, index=vinc_ops.index(vinc_atual))
+            
+            # Turno Fixo
+            turnos_ops = ["", "MATUTINO", "VESPERTINO", "AMBOS"]
+            turno_atual = prof['TURNO_FIXO'] if prof['TURNO_FIXO'] in turnos_ops else ""
+            turno_ed = c_f.selectbox("Turno Fixo (Disponibilidade)", turnos_ops, index=turnos_ops.index(turno_atual))
 
-        # --- LÓGICA DE PROCESSAMENTO (Fora das colunas para largura total) ---
-        if processar:
-            if dt.empty or dc.empty or dd.empty:
-                st.error("❌ Faltam dados (Turmas, Currículo ou ConfigDias).")
-            else:
-                with st.spinner("Processando demanda inteligente..."):
-                    from inteligencia import gerar_novos_professores_inteligentes
-                    novos, analise = gerar_novos_professores_inteligentes(dt, dc, dd, da, dp)
-                    
-                    if not novos.empty:
-                        # 1. Salvar no banco
-                        dp = pd.concat([dp, novos], ignore_index=True)
-                        salvar_seguro(dt, dc, dp, dd, da)
-                        
-                        # 2. Salvar no Estado para mostrar após o refresh
-                        st.session_state['resultado_vagas_smart'] = novos
-                        
-                        # 3. Recarregar
-                        st.rerun()
-                    else:
-                        st.session_state['resultado_vagas_smart'] = pd.DataFrame() # Vazio para indicar sucesso sem vagas
-                        st.success("✅ O quadro atual já atende toda a demanda!")
+            # Linha 3: Carga Horária
+            c_g, c_h = st.columns(2)
+            ch_ed = c_g.number_input("Carga Horária (Aulas)", value=int(prof['CARGA_HORÁRIA']), step=1)
+            pl_ed = c_h.number_input("Carga de PL", value=int(prof['QTD_PL']), step=1)
 
-        # --- EXIBIÇÃO DO RESULTADO (Persistente) ---
-        if st.session_state['resultado_vagas_smart'] is not None:
-            res = st.session_state['resultado_vagas_smart']
-            if not res.empty:
-                st.divider()
-                st.success(f"✅ {len(res)} novos contratos foram criados e salvos!")
+            # Linha 4: Listas (Escolas e Matérias)
+            st.markdown("---")
+            c_i, c_j = st.columns(2)
+            
+            # Escolas (Multiselect)
+            escolas_atuais = [e.strip() for e in str(prof['ESCOLAS_ALOCADAS']).split(',') if e.strip()]
+            lista_escolas_total = sorted(list(set(lista_escolas + escolas_atuais))) # Garante que as atuais apareçam
+            escolas_ed = c_i.multiselect("🏫 Escolas de Atuação", lista_escolas_total, default=escolas_atuais)
+            
+            # Matérias (Multiselect)
+            mats_atuais = [m.strip() for m in str(prof['COMPONENTES']).split(',') if m.strip()]
+            lista_mats_total = sorted(list(set(MATERIAS_ESPECIALISTAS + mats_atuais)))
+            mats_ed = c_j.multiselect("📚 Matérias / Componentes", lista_mats_total, default=mats_atuais)
+
+            # Botão Salvar
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.form_submit_button("💾 Salvar Todas as Alterações", type="primary"):
+                # Atualiza o DataFrame Principal
+                dp.at[idx_real, 'NOME'] = padronizar(nome_ed)
+                dp.at[idx_real, 'REGIÃO'] = reg_ed
+                dp.at[idx_real, 'VÍNCULO'] = vinc_ed
+                dp.at[idx_real, 'TURNO_FIXO'] = turno_ed
+                dp.at[idx_real, 'CARGA_HORÁRIA'] = ch_ed
+                dp.at[idx_real, 'QTD_PL'] = pl_ed
+                dp.at[idx_real, 'ESCOLAS_ALOCADAS'] = ",".join(escolas_ed)
+                dp.at[idx_real, 'COMPONENTES'] = ",".join(mats_ed)
                 
-                st.markdown("### 📋 Detalhes dos Novos Contratos:")
-                st.dataframe(
-                    res[['CÓDIGO', 'NOME', 'CARGA_HORÁRIA', 'REGIÃO', 'QTD_PL']], 
-                    use_container_width=True
-                )
-            
-            # Botão para limpar a visualização
-            if st.button("🧹 Limpar Resultado da Tela"):
-                st.session_state['resultado_vagas_smart'] = None
+                salvar_seguro(dt, dc, dp, dd, da)
+                st.success(f"✅ Dados de **{nome_ed}** atualizados com sucesso!")
+                time.sleep(1)
                 st.rerun()
 
-    # --- 3. ADICIONAR PROFESSOR MANUAL ---
-    with st.expander("➕ Novo Professor Manual", expanded=False):
-        tp = st.radio("Vínculo", ["DT", "EFETIVO"], horizontal=True)
-        with st.form("fp"):
-            c1,c2 = st.columns([1,3])
-            cd = c1.text_input("Cod")
-            nm = c2.text_input("Nome")
-            c3,c4,c5 = st.columns(3)
-            ch = c3.number_input("Aulas", 1, 60, 20)
-            pl = c4.number_input("PL", 0, 10, 0)
-            rg = c5.selectbox("Região", REGIOES)
-            cm = st.multiselect("Matérias", MATERIAS_ESPECIALISTAS)
-            if tp == "EFETIVO":
-                ef_esc = st.multiselect("Escolas", sorted(dt['ESCOLA'].unique()) if not dt.empty else [])
-                ef_trn = st.selectbox("Turno", ["", "MATUTINO", "VESPERTINO", "AMBOS"])
-            else: ef_esc, ef_trn = [], ""
-            
-            if st.form_submit_button("Salvar"):
-                str_esc = ",".join(ef_esc) if ef_esc else ""
-                dp = pd.concat([dp, pd.DataFrame([{
-                    "CÓDIGO": cd, "NOME": padronizar(nm), "CARGA_HORÁRIA": ch, 
-                    "QTD_PL": pl, "REGIÃO": rg, "COMPONENTES": ",".join(cm), 
-                    "VÍNCULO": tp, "ESCOLAS_ALOCADAS": str_esc, "TURNO_FIXO": ef_trn
-                }])], ignore_index=True)
-                salvar_seguro(dt, dc, dp, dd, da)
-
-    # --- 4. TABELA GERAL EDITÁVEL ---
+    # --- 5. CADASTRO DE NOVO PROFESSOR ---
     st.markdown("---")
-    st.markdown("### 👨‍🏫 Quadro Geral de Professores")
-    dp = st.data_editor(dp, num_rows="dynamic", key="edp", use_container_width=True)
-    botao_salvar("Salvar Alterações na Tabela", "bprof")
+    with st.expander("➕ Cadastrar Novo Professor", expanded=False):
+        with st.form("form_novo_prof_v3"):
+            st.write("Preencha todos os dados para o novo cadastro:")
+            
+            nc1, nc2 = st.columns([1, 3])
+            n_cod = nc1.text_input("Código (Ex: P100DTARTE)")
+            n_nom = nc2.text_input("Nome Completo")
+            
+            nc3, nc4, nc5, nc6 = st.columns(4)
+            n_reg = nc3.selectbox("Região", REGIOES)
+            n_vin = nc4.selectbox("Vínculo", ["DT", "EFETIVO"])
+            n_trn = nc5.selectbox("Turno Fixo", ["", "MATUTINO", "VESPERTINO", "AMBOS"])
+            n_ch = nc6.number_input("Carga (Aulas)", 1, 60, 25)
+            
+            nc7, nc8 = st.columns(2)
+            n_esc = nc7.multiselect("Escolas", lista_escolas)
+            n_mat = nc8.multiselect("Matérias", MATERIAS_ESPECIALISTAS)
+            
+            n_pl = st.number_input("PL", 0, 20, 0)
+            
+            if st.form_submit_button("Cadastrar Professor"):
+                if not n_cod:
+                    st.error("Código é obrigatório.")
+                elif n_cod.strip().upper() in dp['CÓDIGO'].values:
+                    st.error("Este código já existe no sistema.")
+                else:
+                    novo = {
+                        "CÓDIGO": n_cod.strip().upper(),
+                        "NOME": padronizar(n_nom),
+                        "REGIÃO": n_reg,
+                        "VÍNCULO": n_vin,
+                        "TURNO_FIXO": n_trn,
+                        "CARGA_HORÁRIA": n_ch,
+                        "QTD_PL": n_pl,
+                        "ESCOLAS_ALOCADAS": ",".join(n_esc),
+                        "COMPONENTES": ",".join(n_mat)
+                    }
+                    dp = pd.concat([dp, pd.DataFrame([novo])], ignore_index=True)
+                    salvar_seguro(dt, dc, dp, dd, da)
+                    st.success("Professor cadastrado!")
+                    time.sleep(1)
+                    st.rerun()
 
-
-# ABA 6: VAGAS - Gerador de Possibilidades
 # ABA 6: VAGAS - Gerador de Possibilidades
 with t6:
     st.markdown("### 💼 Gerador de Vagas - Planejamento de Equipe")
