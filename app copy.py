@@ -2256,7 +2256,7 @@ with t7:
         st.warning("⚠️ Configure a conexão com Google Sheets primeiro.")
 
 # ==========================================
-# ABA 8: VER HORÁRIO (CORES VIBRANTES + RECREIO)
+# ABA 8: VER HORÁRIO (COMPLETO: CARDS + FILTRO DIA + NOVAS OPÇÕES)
 # ==========================================
 with t8:
     if dh.empty: 
@@ -2289,70 +2289,71 @@ with t8:
 
         st.divider()
 
+        # --- 2. FILTROS ---
         c1, c2 = st.columns(2)
         with c1:
-            esc_sel = st.selectbox("🏢 Escolha a Escola", sorted(dh['ESCOLA'].unique()), key="sel_esc_t8")
+            esc_sel = st.selectbox("🏢 Escola", sorted(dh['ESCOLA'].unique()), key="view_esc_card")
         with c2:
-            dia_sel = st.selectbox("📆 Filtrar por Dia", ["Todos os Dias"] + DIAS_SEMANA, key="sel_dia_t8")
+            dia_sel = st.selectbox("📆 Dia", ["Todos os Dias"] + sorted(dh['DIA'].unique().tolist()), key="view_dia_card")
 
+        # --- 3. EXIBIÇÃO EM CARTÕES ---
         df_view = dh[dh['ESCOLA'] == esc_sel].copy()
-        dias_para_mostrar = [dia_sel] if dia_sel != "Todos os Dias" else DIAS_SEMANA
-        
-        for dia in dias_para_mostrar:
-            dia_norm = padronizar(dia)
-            df_dia = df_view[df_view['DIA'].apply(padronizar) == dia_norm]
+        if dia_sel != "Todos os Dias": df_view = df_view[df_view['DIA'] == dia_sel]
+
+        if df_view.empty:
+            st.warning("Nenhum horário encontrado.")
+        else:
+            dias_para_mostrar = [dia_sel] if dia_sel != "Todos os Dias" else DIAS_SEMANA
             
-            if df_dia.empty: continue
-            
-            # Validação de quais turmas exibir (ConfigDias)
-            turmas_dia = df_dia['TURMA'].unique()
-            turmas_v = []
-            for t in turmas_dia:
-                d_t = dt[dt['TURMA'] == t]
-                if not d_t.empty:
-                    serie = d_t.iloc[0]['SÉRIE/ANO']
-                    cfg = dd[dd['SÉRIE/ANO'] == serie]
-                    if not cfg.empty:
-                        if dia_norm in [padronizar(d) for d in cfg['DIA_PLANEJAMENTO'].unique()]:
-                            turmas_v.append(t)
-                    else: turmas_v.append(t)
-                else: turmas_v.append(t)
-            
-            if not turmas_v: continue
-            
-            st.markdown(f"#### 📅 {dia}")
-            for turno in sorted(df_dia['TURNO'].unique()):
-                df_turno = df_dia[df_dia['TURNO'] == turno]
-                turmas_f = [t for t in sorted(df_turno['TURMA'].unique()) if t in turmas_v]
+            for dia in dias_para_mostrar:
+                df_dia = df_view[df_view['DIA'] == dia]
+                if df_dia.empty: continue
                 
-                if not turmas_f: continue
-                st.caption(f"☀️ Turno: {turno}")
+                # FILTRO DE NORMALIZAÇÃO (Corrige Terça-Feira)
+                dia_norm = padronizar(dia)
+                turmas_no_dia = df_dia['TURMA'].unique()
+                turmas_validas_dia = []
                 
-                cols = st.columns(3)
-                for i, t_nome in enumerate(turmas_f):
-                    linha = df_turno[df_turno['TURMA'] == t_nome].iloc[0]
-                    with cols[i % 3]:
-                        # Início do Card
-                        html = f'<div class="turma-card-moldura"><div class="turma-titulo">👥 {t_nome}</div>'
-                        
-                        for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                            cod = linha.get(slot, "---")
-                            est = gerar_estilo_professor_dinamico(cod)
-                            txt_exib = formatar_celula(cod)
-                            
-                            html += f'''
-                            <div class="slot-aula-container" style="background-color: {est['bg']}; color: {est['text']}; border: 1px solid {est['border']};">
-                                <div class="slot-label" style="color: {est['text']}; opacity: 0.6;">{slot}</div>
-                                <div style="flex-grow: 1; text-align: center; font-weight: 800; font-size: 0.95em; letter-spacing: 0.5px;">
-                                    {txt_exib}
-                                </div>
-                            </div>'''
-                            
-                            if slot == "3ª":
-                                html += f'<div style="text-align:center; padding: 2px 0; border-top: 1px dashed #ccc; border-bottom: 1px dashed #ccc; margin: 2px 0;"><span style="font-size: 9px; font-weight: bold; color: #999; letter-spacing: 2px;">RECREIO</span></div>'
-                        
-                        html += "</div>"
-                        st.markdown(html, unsafe_allow_html=True)
+                for t in turmas_no_dia:
+                    dados_t = dt[dt['TURMA'] == t]
+                    if not dados_t.empty:
+                        serie = dados_t.iloc[0]['SÉRIE/ANO']
+                        config = dd[dd['SÉRIE/ANO'] == serie]
+                        if not config.empty:
+                            if dia_norm in [padronizar(d) for d in config['DIA_PLANEJAMENTO'].unique()]:
+                                turmas_validas_dia.append(t)
+                        else:
+                            turmas_validas_dia.append(t)
+                    else:
+                        turmas_validas_dia.append(t)
+                
+                if not turmas_validas_dia: continue
+                
+                st.markdown(f"#### 📅 {dia}")
+                for turno in sorted(df_dia['TURNO'].unique()):
+                    df_turno = df_dia[df_dia['TURNO'] == turno]
+                    turmas_finais = [t for t in sorted(df_turno['TURMA'].unique()) if t in turmas_validas_dia]
+                    if not turmas_finais: continue
+
+                    st.caption(f"☀️ {turno}")
+                    cols = st.columns(3)
+                    
+                    for i, turma in enumerate(turmas_finais):
+                        linha_turma = df_turno[df_turno['TURMA'] == turma].iloc[0]
+                        with cols[i % 3]:
+                            html_card = f'<div class="turma-card-moldura"><div class="turma-titulo">👥 {linha_turma["TURMA"]}</div>'
+                            for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                                prof_id = linha_turma.get(slot, "---")
+                                estilo = gerar_estilo_professor_dinamico(prof_id)
+                                html_card += f'''
+                                <div class="slot-aula-container" style="background-color: {estilo['bg']}; color: {estilo['text']}; border: 1px solid {estilo['border']};">
+                                    <div class="slot-label" style="color: {estilo['text']}; opacity: 0.7;">{slot}</div>
+                                    <div style="flex-grow: 1; text-align: center; font-weight: 800; font-size: 0.9em;">{formatar_celula(prof_id)}</div>
+                                </div>'''
+                                if slot == "3ª":
+                                    html_card += '<div style="text-align:center; font-size:9px; font-weight:bold; color:#999; margin:2px 0;">— RECREIO —</div>'
+                            html_card += "</div>"
+                            st.markdown(html_card, unsafe_allow_html=True)
             st.divider()
              
 # ==========================================
