@@ -2356,44 +2356,50 @@ with t8:
             st.divider()
              
 # ==========================================
-# ABA 9: EDITOR MANUAL (COM VALIDAÇÃO DE CONFLITOS)
+# ABA 9: EDITOR MANUAL (COM VALIDAÇÃO DE MATRIZ E CONFLITOS)
 # ==========================================
 with t9:
     st.markdown("### ✏️ Montagem Manual (Visual)")
     
-    if dt.empty:
-        st.warning("⚠️ Cadastre turmas na aba '🏫 Turmas' primeiro.")
+    if dt.empty or dc.empty:
+        st.warning("⚠️ Cadastre Turmas e Currículo primeiro para habilitar a validação.")
     else:
         # --- 1. FILTROS DE SELEÇÃO ---
         c1, c2, c3 = st.columns(3)
         with c1:
-            esc_man = st.selectbox("🏢 Escola", sorted(dt['ESCOLA'].unique()), key="m_esc_t9")
+            esc_man = st.selectbox("🏢 Escola", sorted(dt['ESCOLA'].unique()), key="m_esc_t9_v2")
         with c2:
-            dia_man = st.selectbox("📅 Dia", DIAS_SEMANA, key="m_dia_t9")
+            dia_man = st.selectbox("📅 Dia", DIAS_SEMANA, key="m_dia_t9_v2")
         with c3:
             turnos_disp = dt[dt['ESCOLA'] == esc_man]['TURNO'].unique()
-            turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="m_trn_t9") if len(turnos_disp) > 0 else None
+            turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="m_trn_t9_v2") if len(turnos_disp) > 0 else None
 
         if turno_man:
             st.divider()
             dia_norm_man = padronizar(dia_man)
             
-            # Identificar turmas alvo (Filtro por ConfigDias + Normalização Terça)
+            # Identificar turmas alvo e suas séries
             df_base_t = dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]
-            turmas_alvo = []
+            turmas_alvo_info = [] # Lista de dicionários {nome, serie}
+            
             for _, r_t in df_base_t.iterrows():
-                config = dd[dd['SÉRIE/ANO'] == r_t['SÉRIE/ANO']]
+                serie_t = r_t['SÉRIE/ANO']
+                config = dd[dd['SÉRIE/ANO'] == serie_t]
                 if not config.empty:
                     dias_ok = [padronizar(d) for d in config['DIA_PLANEJAMENTO'].unique()]
-                    if dia_norm_man in dias_ok: turmas_alvo.append(r_t['TURMA'])
-                else: turmas_alvo.append(r_t['TURMA'])
+                    if dia_norm_man in dias_ok: 
+                        turmas_alvo_info.append({'nome': r_t['TURMA'], 'serie': serie_t})
+                else: 
+                    turmas_alvo_info.append({'nome': r_t['TURMA'], 'serie': serie_t})
             
-            turmas_alvo = sorted(list(set(turmas_alvo)))
+            # Ordenar turmas
+            turmas_alvo_info = sorted(turmas_alvo_info, key=lambda x: x['nome'])
+            turmas_nomes = [t['nome'] for t in turmas_alvo_info]
 
-            if not turmas_alvo:
-                st.info(f"🚫 Nenhuma turma configurada para {dia_man} nesta unidade.")
+            if not turmas_nomes:
+                st.info(f"🚫 Nenhuma turma configurada para {dia_man}.")
             else:
-                # Carregar dados atuais para preenchimento
+                # Carregar horários atuais
                 horario_atual = {}
                 if not dh.empty:
                     mask = (dh['ESCOLA'] == esc_man) & (dh['DIA'].apply(padronizar) == dia_norm_man) & (dh['TURNO'] == turno_man)
@@ -2405,9 +2411,10 @@ with t9:
                 
                 # GRID DE EDIÇÃO
                 grid = st.columns(3)
-                for idx, turma in enumerate(turmas_alvo):
+                for idx, t_info in enumerate(turmas_alvo_info):
+                    turma = t_info['nome']
                     with grid[idx % 3]:
-                        st.markdown(f'<div class="turma-card-moldura" style="background:#f9f9f9; border-left-color:#bdc3c7;"><div class="turma-titulo" style="font-size:13px;">👥 {turma}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="turma-card-moldura" style="background:#f9f9f9;"><div class="turma-titulo" style="font-size:13px;">👥 {turma} <br><small style="color:#666">({t_info["serie"]})</small></div>', unsafe_allow_html=True)
                         
                         for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
                             val_ini = horario_atual.get(turma, {}).get(slot, "---")
@@ -2421,74 +2428,88 @@ with t9:
                                                        index=lista_profs.index(val_ini),
                                                        key=f"ed_{turma}_{slot}_{dia_man}", label_visibility="collapsed")
                                 
-                                # Indicador de Cor Sincronizado
-                                est = gerar_estilo_professor_dinamico(res_prof)
+                                estilo = gerar_estilo_professor_dinamico(res_prof)
                                 if res_prof != "---":
-                                    st.markdown(f'<div style="background:{est["bg"]}; color:{est["text"]}; border-radius:4px; font-size:10px; font-weight:800; text-align:center; margin-top:-12px; margin-bottom:12px; padding:2px; border:1px solid {est["border"]}">{res_prof}</div>', unsafe_allow_html=True)
+                                    st.markdown(f'<div style="background:{estilo["bg"]}; color:{estilo["text"]}; border-radius:4px; font-size:10px; font-weight:800; text-align:center; margin-top:-12px; margin-bottom:12px; padding:2px; border:1px solid {estilo["border"]}">{res_prof}</div>', unsafe_allow_html=True)
                                 
                                 escolhas_t9[(turma, slot)] = res_prof
                         st.markdown('</div>', unsafe_allow_html=True)
 
-                # --- BOTÃO SALVAR COM VALIDAÇÃO ---
+                # --- BOTÃO SALVAR COM VALIDAÇÃO COMPLETA ---
                 st.divider()
-                if st.button("💾 Validar e Salvar Alterações", type="primary", use_container_width=True):
+                if st.button("💾 Validar Matriz e Salvar", type="primary", use_container_width=True):
                     conflitos = []
+                    erros_matriz = []
                     
-                    # A. Identificar região da escola para validação
                     regiao_escola = padronizar(dt[dt['ESCOLA'] == esc_man].iloc[0]['REGIÃO'])
-                    
-                    # B. Preparar base para conflitos externos (outras escolas no mesmo dia)
                     mask_edit = (dh['ESCOLA'] == esc_man) & (dh['DIA'].apply(padronizar) == dia_norm_man) & (dh['TURNO'] == turno_man)
                     dh_externo = dh[~mask_edit] if not dh.empty else pd.DataFrame()
-                    if not dh_externo.empty:
-                        dh_externo = dh_externo[dh_externo['DIA'].apply(padronizar) == dia_norm_man]
 
-                    # C. LOOP DE VALIDAÇÃO
+                    # 1. VALIDAÇÃO DE CONFLITOS (QUEM ESTÁ ONDE)
                     for slot_v in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                        # 1. Checar Conflito Local (Mesma tela)
-                        profs_no_slot = [escolhas_t9[(t_v, slot_v)] for t_v in turmas_alvo if escolhas_t9[(t_v, slot_v)] != "---"]
+                        profs_no_slot = [escolhas_t9[(t, slot_v)] for t in turmas_nomes if escolhas_t9[(t, slot_v)] != "---"]
                         duplicados = set([x for x in profs_no_slot if profs_no_slot.count(x) > 1])
                         for d in duplicados:
-                            conflitos.append(f"❌ **Conflito Local:** {d} está em mais de uma turma no {slot_v} horário.")
+                            conflitos.append(f"❌ **Ocupação:** Professor {d} está em duas salas ao mesmo tempo ({slot_v} aula).")
 
-                        # 2. Checar Conflito Externo e Região
-                        for t_v in turmas_alvo:
-                            p_v = escolhas_t9[(t_v, slot_v)]
-                            if p_v == "---": continue
+                    # 2. VALIDAÇÃO DE MATRIZ CURRICULAR (QUANTITATIVO)
+                    for t_info in turmas_alvo_info:
+                        turma_n = t_info['nome']
+                        serie_n = t_info['serie']
+                        
+                        # Pegar o currículo esperado para esta série (apenas especialistas)
+                        curr_esperado = dc[dc['SÉRIE/ANO'] == serie_n]
+                        
+                        # Contar o que foi alocado para esta turma
+                        alocacao_atual = [escolhas_t9[(turma_n, s)] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"] if escolhas_t9[(turma_n, s)] != "---"]
+                        
+                        for _, item in curr_esperado.iterrows():
+                            comp = padronizar_materia_interna(item['COMPONENTE'])
+                            qtd_devida = int(item['QTD_AULAS'])
                             
-                            # Região
-                            dados_p = dp[dp['CÓDIGO'] == p_v]
-                            if not dados_p.empty:
-                                reg_p = padronizar(dados_p.iloc[0]['REGIÃO'])
-                                pode, _ = verificar_compatibilidade_regiao(reg_p, regiao_escola)
-                                if not pode:
-                                    conflitos.append(f"🌍 **Região:** {p_v} ({reg_p}) não atende a região {regiao_escola}.")
+                            # Contar quantos professores dessa matéria foram alocados
+                            qtd_real = 0
+                            for p_id in alocacao_atual:
+                                p_dados = dp[dp['CÓDIGO'] == p_id]
+                                if not p_dados.empty:
+                                    comps_p = [padronizar_materia_interna(m.strip()) for m in str(p_dados.iloc[0]['COMPONENTES']).split(',')]
+                                    if comp in comps_p:
+                                        qtd_real += 1
+                            
+                            if qtd_real < qtd_devida:
+                                erros_matriz.append(f"📚 **{turma_n}**: Faltam {qtd_devida - qtd_real} aula(s) de **{comp}**.")
+                            elif qtd_real > qtd_devida:
+                                erros_matriz.append(f"⚠️ **{turma_n}**: Há {qtd_real - qtd_devida} aula(s) a MAIS de **{comp}**.")
 
-                            # Externo
-                            if not dh_externo.empty:
-                                match_ext = dh_externo[dh_externo[slot_v] == p_v]
-                                for _, row_ext in match_ext.iterrows():
-                                    conflitos.append(f"⛔ **Conflito Externo:** {p_v} já está em {row_ext['ESCOLA']} ({row_ext['TURMA']}) no {slot_v} horário.")
+                    # EXIBIR ALERTAS
+                    if conflitos or erros_matriz:
+                        if conflitos:
+                            st.error("### 🛑 Bloqueio: Conflitos de Horário")
+                            for m in set(conflitos): st.write(m)
+                        
+                        if erros_matriz:
+                            st.warning("### ⚠️ Atenção: Divergência na Matriz Curricular")
+                            st.info("O sistema permite salvar com erros de matriz, mas verifique os avisos abaixo:")
+                            for m in erros_matriz: st.write(m)
+                        
+                        # Se houver conflito de horário (mesmo professor em 2 salas), bloqueia o salvamento
+                        if conflitos:
+                            st.stop()
 
-                    # D. DECISÃO FINAL
-                    if conflitos:
-                        st.error(f"Foram encontrados {len(set(conflitos))} problemas que impedem o salvamento:")
-                        for msg in sorted(list(set(conflitos))):
-                            st.write(msg)
-                    else:
-                        with st.spinner("Gravando no banco de dados..."):
-                            novas_linhas = []
-                            for t in turmas_alvo:
-                                linha = {"ESCOLA": esc_man, "TURMA": t, "TURNO": turno_man, "DIA": dia_man}
-                                for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                                    linha[s] = escolhas_t9[(t, s)]
-                                novas_linhas.append(linha)
-                            
-                            if not dh.empty:
-                                dh = dh[~mask_edit]
-                            
-                            dh = pd.concat([dh, pd.DataFrame(novas_linhas)], ignore_index=True)
-                            salvar_seguro(dt, dc, dp, dd, da, dh)
-                            st.success("✅ Alterações validadas e salvas com sucesso!")
-                            time.sleep(1)
-                            st.rerun()
+                    # SALVAMENTO (Se chegou aqui, não há conflitos impeditivos)
+                    with st.spinner("Gravando alterações..."):
+                        novas_linhas = []
+                        for t in turmas_nomes:
+                            linha = {"ESCOLA": esc_man, "TURMA": t, "TURNO": turno_man, "DIA": dia_man}
+                            for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                                linha[s] = escolhas_t9[(t, s)]
+                            novas_linhas.append(linha)
+                        
+                        if not dh.empty:
+                            dh = dh[~mask_edit]
+                        
+                        dh = pd.concat([dh, pd.DataFrame(novas_linhas)], ignore_index=True)
+                        salvar_seguro(dt, dc, dp, dd, da, dh)
+                        st.success("✅ Grade salva com sucesso!")
+                        time.sleep(1)
+                        st.rerun()
