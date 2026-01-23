@@ -2356,146 +2356,139 @@ with t8:
             st.divider()
              
 # ==========================================
-# ABA 9: EDITOR MANUAL (CORES SINCRONIZADAS COM ABA 8)
+# ABA 9: EDITOR MANUAL (COM VALIDAÇÃO DE CONFLITOS)
 # ==========================================
 with t9:
     st.markdown("### ✏️ Montagem Manual (Visual)")
-    st.info("💡 As cores abaixo são geradas automaticamente conforme o professor selecionado, seguindo o padrão da visualização.")
-
+    
     if dt.empty:
         st.warning("⚠️ Cadastre turmas na aba '🏫 Turmas' primeiro.")
     else:
         # --- 1. FILTROS DE SELEÇÃO ---
         c1, c2, c3 = st.columns(3)
         with c1:
-            esc_man = st.selectbox("🏢 Escola", sorted(dt['ESCOLA'].unique()), key="man_esc_edit")
+            esc_man = st.selectbox("🏢 Escola", sorted(dt['ESCOLA'].unique()), key="m_esc_t9")
         with c2:
-            # Ordenação dos dias para o seletor
-            dias_ord = {d: i for i, d in enumerate(DIAS_SEMANA)}
-            dia_man = st.selectbox("📅 Dia", sorted(DIAS_SEMANA, key=lambda x: dias_ord.get(x, 99)), key="man_dia_edit")
+            dia_man = st.selectbox("📅 Dia", DIAS_SEMANA, key="m_dia_t9")
         with c3:
             turnos_disp = dt[dt['ESCOLA'] == esc_man]['TURNO'].unique()
-            turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="man_turno_edit") if len(turnos_disp) > 0 else None
+            turno_man = st.selectbox("☀️ Turno", sorted(turnos_disp), key="m_trn_t9") if len(turnos_disp) > 0 else None
 
-        # --- 2. ÁREA DE EDIÇÃO VISUAL ---
         if turno_man:
             st.divider()
+            dia_norm_man = padronizar(dia_man)
             
-            # Filtro robusto de turmas (com a correção da Terça-Feira)
-            df_turmas_base = dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]
-            dia_norm = padronizar(dia_man)
-            turmas_filtradas = []
-
-            for _, row in df_turmas_base.iterrows():
-                config = dd[dd['SÉRIE/ANO'] == row['SÉRIE/ANO']]
+            # Identificar turmas alvo (Filtro por ConfigDias + Normalização Terça)
+            df_base_t = dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]
+            turmas_alvo = []
+            for _, r_t in df_base_t.iterrows():
+                config = dd[dd['SÉRIE/ANO'] == r_t['SÉRIE/ANO']]
                 if not config.empty:
-                    if dia_norm in [padronizar(d) for d in config['DIA_PLANEJAMENTO'].unique()]:
-                        turmas_filtradas.append(row['TURMA'])
-                else:
-                    turmas_filtradas.append(row['TURMA'])
-
-            turmas_alvo = sorted(list(set(turmas_filtradas)))
+                    dias_ok = [padronizar(d) for d in config['DIA_PLANEJAMENTO'].unique()]
+                    if dia_norm_man in dias_ok: turmas_alvo.append(r_t['TURMA'])
+                else: turmas_alvo.append(r_t['TURMA'])
+            
+            turmas_alvo = sorted(list(set(turmas_alvo)))
 
             if not turmas_alvo:
-                st.info(f"🚫 Nenhuma turma configurada para {dia_man} nesta escola/turno.")
+                st.info(f"🚫 Nenhuma turma configurada para {dia_man} nesta unidade.")
             else:
-                # Carregar horários já existentes no banco para preencher os campos
-                horario_existente = {} 
+                # Carregar dados atuais para preenchimento
+                horario_atual = {}
                 if not dh.empty:
-                    mask = (dh['ESCOLA'] == esc_man) & (dh['DIA'].apply(padronizar) == dia_norm) & (dh['TURNO'] == turno_man)
-                    df_recorte = dh[mask]
-                    for _, row in df_recorte.iterrows():
-                        horario_existente[row['TURMA']] = {s: row[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
+                    mask = (dh['ESCOLA'] == esc_man) & (dh['DIA'].apply(padronizar) == dia_norm_man) & (dh['TURNO'] == turno_man)
+                    for _, row in dh[mask].iterrows():
+                        horario_atual[row['TURMA']] = {s: row[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
 
-                # Lista de professores disponíveis para o Selectbox
                 lista_profs = ["---"] + sorted(dp['CÓDIGO'].unique().tolist())
+                escolhas_t9 = {}
                 
-                # Layout em 3 colunas de turmas
-                cols_layout = st.columns(3)
-                escolhas_usuario = {}
-
-                for i, turma in enumerate(turmas_alvo):
-                    col_atual = cols_layout[i % 3] 
-                    
-                    with col_atual:
-                        # Cabeçalho da Turma no Editor
-                        st.markdown(f'''
-                            <div class="turma-card-moldura" style="background-color: #fcfcfc; border-left-color: #bdc3c7;">
-                                <div class="turma-titulo" style="font-size: 14px;">👥 {turma}</div>
-                            </div>
-                        ''', unsafe_allow_html=True)
+                # GRID DE EDIÇÃO
+                grid = st.columns(3)
+                for idx, turma in enumerate(turmas_alvo):
+                    with grid[idx % 3]:
+                        st.markdown(f'<div class="turma-card-moldura" style="background:#f9f9f9; border-left-color:#bdc3c7;"><div class="turma-titulo" style="font-size:13px;">👥 {turma}</div>', unsafe_allow_html=True)
                         
-                        # Campos de Seleção para cada uma das 5 aulas
                         for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                            val_atual = horario_existente.get(turma, {}).get(slot, "---")
-                            if val_atual not in lista_profs: val_atual = "---"
+                            val_ini = horario_atual.get(turma, {}).get(slot, "---")
+                            if val_ini not in lista_profs: val_ini = "---"
                             
-                            # Container lado a lado: Número da Aula | Seletor
-                            c_num, c_box = st.columns([1, 4]) 
+                            c_num, c_box = st.columns([1, 4])
                             with c_num:
-                                st.markdown(f"<div style='padding-top: 10px; font-weight:bold; text-align:right; font-size:12px; color:#666;'>{slot}</div>", unsafe_allow_html=True)
-                            
+                                st.markdown(f"<div style='padding-top:10px; font-weight:bold; font-size:11px;'>{slot}</div>", unsafe_allow_html=True)
                             with c_box:
-                                # O Seletor de Professor
-                                escolha = st.selectbox(
-                                    f"Prof_{turma}_{slot}", 
-                                    options=lista_profs, 
-                                    index=lista_profs.index(val_atual),
-                                    key=f"edit_manual_{esc_man}_{dia_man}_{turma}_{slot}",
-                                    label_visibility="collapsed"
-                                )
+                                res_prof = st.selectbox(f"P_{turma}_{slot}", lista_profs, 
+                                                       index=lista_profs.index(val_ini),
+                                                       key=f"ed_{turma}_{slot}_{dia_man}", label_visibility="collapsed")
                                 
-                                # --- O DIFERENCIAL: ETIQUETA COLORIDA IDENTIFICADORA ---
-                                # Chamamos a mesma função de estilo da Aba 8
-                                estilo_prof = gerar_estilo_professor_dinamico(escolha)
+                                # Indicador de Cor Sincronizado
+                                est = gerar_estilo_professor_dinamico(res_prof)
+                                if res_prof != "---":
+                                    st.markdown(f'<div style="background:{est["bg"]}; color:{est["text"]}; border-radius:4px; font-size:10px; font-weight:800; text-align:center; margin-top:-12px; margin-bottom:12px; padding:2px; border:1px solid {est["border"]}">{res_prof}</div>', unsafe_allow_html=True)
                                 
-                                if escolha != "---":
-                                    st.markdown(f'''
-                                        <div style="background-color:{estilo_prof['bg']}; color:{estilo_prof['text']}; 
-                                        padding:3px 8px; border-radius:4px; font-size:11px; font-weight:800; 
-                                        text-align:center; margin-top:-10px; margin-bottom:12px; 
-                                        border: 1.5px solid {estilo_prof['border']}; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                                            {escolha}
-                                        </div>
-                                    ''', unsafe_allow_html=True)
-                                else:
-                                    st.write("") # Espaço vazio para manter o alinhamento
-                            
-                            escolhas_usuario[(turma, slot)] = escolha
-                        
-                        st.write("---") # Linha divisória entre turmas na mesma coluna
+                                escolhas_t9[(turma, slot)] = res_prof
+                        st.markdown('</div>', unsafe_allow_html=True)
 
-                # --- 3. BOTÃO DE SALVAMENTO ---
+                # --- BOTÃO SALVAR COM VALIDAÇÃO ---
                 st.divider()
-                col_btn, _ = st.columns([2, 3])
-                with col_btn:
-                    if st.button("💾 Gravar Alterações na Planilha", type="primary", use_container_width=True):
-                        if not sistema_seguro:
-                            st.error("❌ Erro: Sistema sem conexão com o banco de dados.")
-                        else:
-                            with st.spinner("Salvando no Google Sheets..."):
-                                # Preparar novas linhas para o DataFrame de horários
-                                novas_linhas = []
-                                for t in turmas_alvo:
-                                    dados_linha = {
-                                        "ESCOLA": esc_man, 
-                                        "TURMA": t, 
-                                        "TURNO": turno_man, 
-                                        "DIA": dia_man
-                                    }
-                                    for slot_s in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                                        dados_linha[slot_s] = escolhas_usuario[(t, slot_s)]
-                                    novas_linhas.append(dados_linha)
-                                
-                                # Remover registros antigos e concatenar os novos
-                                if not dh.empty:
-                                    mask_rem = (dh['ESCOLA'] == esc_man) & (dh['DIA'].apply(padronizar) == dia_norm) & (dh['TURNO'] == turno_man)
-                                    dh = dh[~mask_rem]
-                                
-                                dh = pd.concat([dh, pd.DataFrame(novas_linhas)], ignore_index=True)
-                                
-                                # Enviar para o Google Sheets
-                                salvar_seguro(dt, dc, dp, dd, da, dh)
-                                st.success(f"✅ Horário de {dia_man} ({esc_man}) atualizado com sucesso!")
-                                time.sleep(1)
-                                st.rerun()
+                if st.button("💾 Validar e Salvar Alterações", type="primary", use_container_width=True):
+                    conflitos = []
+                    
+                    # A. Identificar região da escola para validação
+                    regiao_escola = padronizar(dt[dt['ESCOLA'] == esc_man].iloc[0]['REGIÃO'])
+                    
+                    # B. Preparar base para conflitos externos (outras escolas no mesmo dia)
+                    mask_edit = (dh['ESCOLA'] == esc_man) & (dh['DIA'].apply(padronizar) == dia_norm_man) & (dh['TURNO'] == turno_man)
+                    dh_externo = dh[~mask_edit] if not dh.empty else pd.DataFrame()
+                    if not dh_externo.empty:
+                        dh_externo = dh_externo[dh_externo['DIA'].apply(padronizar) == dia_norm_man]
+
+                    # C. LOOP DE VALIDAÇÃO
+                    for slot_v in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                        # 1. Checar Conflito Local (Mesma tela)
+                        profs_no_slot = [escolhas_t9[(t_v, slot_v)] for t_v in turmas_alvo if escolhas_t9[(t_v, slot_v)] != "---"]
+                        duplicados = set([x for x in profs_no_slot if profs_no_slot.count(x) > 1])
+                        for d in duplicados:
+                            conflitos.append(f"❌ **Conflito Local:** {d} está em mais de uma turma no {slot_v} horário.")
+
+                        # 2. Checar Conflito Externo e Região
+                        for t_v in turmas_alvo:
+                            p_v = escolhas_t9[(t_v, slot_v)]
+                            if p_v == "---": continue
+                            
+                            # Região
+                            dados_p = dp[dp['CÓDIGO'] == p_v]
+                            if not dados_p.empty:
+                                reg_p = padronizar(dados_p.iloc[0]['REGIÃO'])
+                                pode, _ = verificar_compatibilidade_regiao(reg_p, regiao_escola)
+                                if not pode:
+                                    conflitos.append(f"🌍 **Região:** {p_v} ({reg_p}) não atende a região {regiao_escola}.")
+
+                            # Externo
+                            if not dh_externo.empty:
+                                match_ext = dh_externo[dh_externo[slot_v] == p_v]
+                                for _, row_ext in match_ext.iterrows():
+                                    conflitos.append(f"⛔ **Conflito Externo:** {p_v} já está em {row_ext['ESCOLA']} ({row_ext['TURMA']}) no {slot_v} horário.")
+
+                    # D. DECISÃO FINAL
+                    if conflitos:
+                        st.error(f"Foram encontrados {len(set(conflitos))} problemas que impedem o salvamento:")
+                        for msg in sorted(list(set(conflitos))):
+                            st.write(msg)
+                    else:
+                        with st.spinner("Gravando no banco de dados..."):
+                            novas_linhas = []
+                            for t in turmas_alvo:
+                                linha = {"ESCOLA": esc_man, "TURMA": t, "TURNO": turno_man, "DIA": dia_man}
+                                for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                                    linha[s] = escolhas_t9[(t, s)]
+                                novas_linhas.append(linha)
+                            
+                            if not dh.empty:
+                                dh = dh[~mask_edit]
+                            
+                            dh = pd.concat([dh, pd.DataFrame(novas_linhas)], ignore_index=True)
+                            salvar_seguro(dt, dc, dp, dd, da, dh)
+                            st.success("✅ Alterações validadas e salvas com sucesso!")
+                            time.sleep(1)
+                            st.rerun()
