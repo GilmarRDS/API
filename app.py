@@ -50,11 +50,14 @@ import io
 
 
 # ==========================================
-# FUNÇÃO GERADORA DE PDF (ESTILO VISUAL IGUAL À TELA)
+# FUNÇÃO GERADORA DE PDF (COM FORMATAÇÃO VISUAL IGUAL À TELA)
 # ==========================================
-def gerar_pdf_escola(df_horario, nome_escola, dia_filtro="Todos"):
+def gerar_pdf_escola(df_horario, nome_escola, dia_filtro="Todos", config_visual=None):
+    """
+    Gera PDF respeitando o modo de visualização (Nome, Matéria, etc).
+    config_visual: dict com keys {'modo': str, 'map_nome': dict, 'map_comp': dict}
+    """
     buffer = io.BytesIO()
-    # Layout Paisagem para caber 3 cartões lado a lado
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
                             rightMargin=10*mm, leftMargin=10*mm, 
                             topMargin=10*mm, bottomMargin=10*mm)
@@ -62,16 +65,44 @@ def gerar_pdf_escola(df_horario, nome_escola, dia_filtro="Todos"):
     elements = []
     styles = getSampleStyleSheet()
     
-    # Estilos de Texto
+    # Estilos
     estilo_titulo = ParagraphStyle('Titulo', parent=styles['Heading1'], alignment=1, fontSize=16, spaceAfter=10)
     estilo_card_titulo = ParagraphStyle('CardTitle', parent=styles['Normal'], fontSize=10, fontName='Helvetica-Bold', textColor=colors.black)
-    estilo_aula = ParagraphStyle('Aula', parent=styles['Normal'], fontSize=8, alignment=1, textColor=colors.black, fontName='Helvetica-Bold')
+    estilo_aula = ParagraphStyle('Aula', parent=styles['Normal'], fontSize=8, alignment=1, textColor=colors.black, fontName='Helvetica-Bold', leading=9) # Leading ajustado para quebras de linha
     estilo_recreio = ParagraphStyle('Recreio', parent=styles['Normal'], fontSize=6, alignment=1, textColor=colors.gray)
 
-    # Título do Documento
+    # --- HELPER DE FORMATAÇÃO (REPLICA A LÓGICA DA UI) ---
+    def formatar_para_pdf(codigo):
+        if not config_visual: return codigo
+        if not codigo or codigo == "---": return "-"
+        
+        modo = config_visual.get('modo', 'Apenas Código')
+        map_nome = config_visual.get('map_nome', {})
+        map_comp = config_visual.get('map_comp', {})
+        
+        nome = map_nome.get(codigo, codigo)
+        # Tenta pegar primeiro nome e último para economizar espaço
+        if len(nome.split()) > 1:
+            nome_curto = nome.split()[0] + " " + nome.split()[-1]
+        else:
+            nome_curto = nome
+            
+        mat = map_comp.get(codigo, "?")
+        
+        # Lógica de Exibição (Igual ao formatar_celula da Aba 8)
+        if modo == "Apenas Código": return codigo
+        if modo == "Nome do Professor": return nome_curto
+        if modo == "Matéria/Componente": return mat
+        if modo == "Nome + Matéria": return f"{nome_curto}<br/>({mat})" # <br/> quebra linha no PDF
+        if modo == "Código + Nome": return f"{codigo}<br/>{nome_curto}"
+        if modo == "Código + Componente": return f"{codigo}<br/>{mat}"
+        return codigo
+
+    # Cabeçalho
     titulo_texto = f"Horário Escolar - {nome_escola}"
-    if dia_filtro != "Todos" and dia_filtro != "Todos os Dias":
+    if dia_filtro not in ["Todos", "Todos os Dias"]:
         titulo_texto += f" ({dia_filtro})"
+    
     elements.append(Paragraph(titulo_texto, estilo_titulo))
     elements.append(Spacer(1, 5*mm))
 
@@ -81,87 +112,74 @@ def gerar_pdf_escola(df_horario, nome_escola, dia_filtro="Todos"):
         buffer.seek(0)
         return buffer
 
-    # --- LÓGICA DE ORGANIZAÇÃO ---
-    # Se o filtro for "Todos", vamos iterar pelos dias. Se for um dia específico, fazemos só ele.
+    # Lista de dias
     if dia_filtro in ["Todos", "Todos os Dias"]:
         dias_para_imprimir = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira"]
     else:
         dias_para_imprimir = [dia_filtro]
 
+    dias_impressos = 0
+
     for dia_nome in dias_para_imprimir:
-        # Título do Dia
+        df_dia = df_horario[df_horario['DIA'].apply(padronizar) == padronizar(dia_nome)]
+        
+        if df_dia.empty: continue 
+        dias_impressos += 1
+
         elements.append(Paragraph(f"📅 {dia_nome}", styles['Heading2']))
         elements.append(Spacer(1, 2*mm))
 
-        # Filtra dados do dia
-        df_dia = df_horario[df_horario['DIA'].apply(padronizar) == padronizar(dia_nome)]
-        
-        if df_dia.empty:
-            elements.append(Paragraph("Não há aulas neste dia.", styles['Normal']))
-            elements.append(Spacer(1, 5*mm))
-            continue
-
-        # Agrupar por Turno
         turnos = sorted(df_dia['TURNO'].unique())
         
         for turno in turnos:
             elements.append(Paragraph(f"☀️ Turno: {turno}", styles['Heading3']))
             elements.append(Spacer(1, 2*mm))
 
-            # Pega as turmas deste dia e turno
             df_turno = df_dia[df_dia['TURNO'] == turno]
             turmas_lista = sorted(df_turno['TURMA'].unique())
 
-            # --- MONTAR O GRID DE CARTÕES (3 por linha) ---
-            # Vamos criar uma lista de "Tabelas" (cada tabela é um cartão)
+            # GRID DE CARTÕES
             row_cards = []
             
             for turma in turmas_lista:
                 row_dados = df_turno[df_turno['TURMA'] == turma].iloc[0]
                 
-                # CONSTRUÇÃO DO CARTÃO (MINI-TABELA)
                 card_data = []
                 card_styles = []
                 
-                # 1. Cabeçalho do Cartão (Nome da Turma)
-                card_data.append([Paragraph(f"👥 {turma}", estilo_card_titulo), ""]) # Colspan
+                # Header Turma
+                card_data.append([Paragraph(f"👥 {turma}", estilo_card_titulo), ""]) 
                 card_styles.append(('SPAN', (0,0), (1,0)))
                 card_styles.append(('BACKGROUND', (0,0), (1,0), colors.whitesmoke))
                 card_styles.append(('BOTTOMPADDING', (0,0), (1,0), 6))
                 
-                # 2. Slots de Aula
+                # Aulas
                 for i, slot in enumerate(["1ª", "2ª", "3ª", "4ª", "5ª"]):
                     prof_cod = row_dados.get(slot, "---")
                     
-                    # Recupera a cor da função original (convertendo para ReportLab)
+                    # COR DE FUNDO
                     estilo_app = gerar_estilo_professor_dinamico(prof_cod)
-                    bg_hex = estilo_app['bg']
-                    txt_hex = estilo_app['text']
-                    
                     try:
-                        bg_color = HexColor(bg_hex)
-                        txt_color = HexColor(txt_hex)
+                        bg_color = HexColor(estilo_app['bg'])
+                        txt_color = HexColor(estilo_app['text'])
                     except:
                         bg_color = colors.white
                         txt_color = colors.black
 
-                    # Cria estilo específico para esta célula
+                    # TEXTO FORMATADO (AQUI ESTÁ A MÁGICA QUE SEGUE O FILTRO)
+                    texto_formatado = formatar_para_pdf(prof_cod)
+                    
+                    # Estilo da Célula
                     estilo_celula = ParagraphStyle(f'Cell{turma}{slot}', parent=estilo_aula, textColor=txt_color)
                     
-                    # Texto da Célula
-                    texto_celula = prof_cod if prof_cod != "---" else "-"
-                    
-                    # Adiciona Linha da Aula
                     row_idx = len(card_data)
-                    card_data.append([slot, Paragraph(texto_celula, estilo_celula)])
+                    card_data.append([slot, Paragraph(texto_formatado, estilo_celula)])
                     
-                    # Estilo da linha (Cor de Fundo)
                     card_styles.append(('BACKGROUND', (0, row_idx), (1, row_idx), bg_color))
-                    card_styles.append(('ALIGN', (0, row_idx), (0, row_idx), 'CENTER')) # Alinha Slot
+                    card_styles.append(('ALIGN', (0, row_idx), (0, row_idx), 'CENTER'))
                     card_styles.append(('VALIGN', (0, row_idx), (1, row_idx), 'MIDDLE'))
-                    card_styles.append(('GRID', (0, row_idx), (1, row_idx), 0.5, colors.white)) # Borda branca fina
+                    card_styles.append(('GRID', (0, row_idx), (1, row_idx), 0.5, colors.white))
 
-                    # Inserir RECREIO visual após a 3ª aula
                     if slot == "3ª":
                         row_idx = len(card_data)
                         card_data.append(["", Paragraph("— RECREIO —", estilo_recreio)])
@@ -169,43 +187,37 @@ def gerar_pdf_escola(df_horario, nome_escola, dia_filtro="Todos"):
                         card_styles.append(('TOPPADDING', (0, row_idx), (1, row_idx), 1))
                         card_styles.append(('BOTTOMPADDING', (0, row_idx), (1, row_idx), 1))
 
-                # Criar a Tabela do Cartão
                 t_card = Table(card_data, colWidths=[10*mm, 75*mm])
                 t_card.setStyle(TableStyle(card_styles + [
-                    ('BOX', (0,0), (-1,-1), 1, colors.lightgrey), # Borda externa do cartão
-                    ('ROUNDEDCORNERS', [5, 5, 5, 5]) # Tenta arredondar (funciona em versões novas)
+                    ('BOX', (0,0), (-1,-1), 1, colors.lightgrey),
+                    ('ROUNDEDCORNERS', [5, 5, 5, 5])
                 ]))
-                
                 row_cards.append(t_card)
 
-            # --- ORGANIZAR CARTÕES EM GRIDS DE 3 ---
-            # Divide a lista de cartões em pedaços de 3
+            # Organizar em Grid de 3
             grid_data = [row_cards[i:i + 3] for i in range(0, len(row_cards), 3)]
-            
-            # Preenche espaços vazios na última linha se não for múltiplo de 3
             if grid_data:
-                ultima_linha = grid_data[-1]
-                while len(ultima_linha) < 3:
-                    ultima_linha.append(Spacer(1, 1)) # Placeholder vazio
+                while len(grid_data[-1]) < 3: grid_data[-1].append(Spacer(1, 1))
 
-            # Cria a Tabela Mestra (O Grid)
             t_grid = Table(grid_data, colWidths=[90*mm, 90*mm, 90*mm])
             t_grid.setStyle(TableStyle([
                 ('VALIGN', (0,0), (-1,-1), 'TOP'),
                 ('LEFTPADDING', (0,0), (-1,-1), 2),
                 ('RIGHTPADDING', (0,0), (-1,-1), 2),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 10), # Espaço entre linhas de cartões
+                ('BOTTOMPADDING', (0,0), (-1,-1), 10),
             ]))
             
             elements.append(t_grid)
             elements.append(Spacer(1, 5*mm))
             
-        elements.append(PageBreak()) # Quebra página a cada dia
+        elements.append(PageBreak())
+
+    if dias_impressos == 0:
+        elements.append(Paragraph("Nenhuma aula encontrada.", styles['Normal']))
 
     doc.build(elements)
     buffer.seek(0)
     return buffer
-
 # ==========================================
 # 1. CONFIGURAÇÕES & ESTILO
 # ==========================================
@@ -2601,10 +2613,10 @@ with t8:
             map_comp = dict(zip(dp['CÓDIGO'], dp['COMPONENTES']))
             
             opcoes_vis = [
-                "Código + Componente", "Nome + Matéria", 
-                "Apenas Código", "Nome do Professor"
+                "Apenas Código", "Nome do Professor", "Matéria/Componente", 
+                "Nome + Matéria", "Código + Nome", "Código + Componente"
             ]
-            modo_vis = st.radio("Exibir nos cartões:", opcoes_vis, horizontal=True)
+            modo_vis = st.radio("Exibir:", opcoes_vis, horizontal=True)
             
             def formatar_celula(codigo):
                 if not codigo or codigo == "---": return "---"
@@ -2631,11 +2643,24 @@ with t8:
             st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True) 
             if st.button("📄 Baixar PDF desta Escola", type="primary", use_container_width=True):
                 with st.spinner("Gerando documento visual..."):
-                    # Filtra dados da escola
+                    
+                    # 1. PREPARA CONFIGURAÇÃO VISUAL (Captura o que você vê na tela)
+                    config_visual = {
+                        'modo': modo_vis,  # <--- O filtro que você selecionou no Radio Button
+                        'map_nome': map_nome, # Os nomes dos professores
+                        'map_comp': map_comp  # As matérias
+                    }
+                    
+                    # 2. FILTRA DADOS
                     df_pdf = dh[dh['ESCOLA'] == esc_sel]
                     
-                    # CHAMA A NOVA FUNÇÃO PASSANDO O DIA SELECIONADO
-                    pdf_bytes = gerar_pdf_escola(df_pdf, esc_sel, dia_filtro=dia_sel)
+                    # 3. GERA PDF COM CONFIGURAÇÃO
+                    pdf_bytes = gerar_pdf_escola(
+                        df_pdf, 
+                        esc_sel, 
+                        dia_filtro=dia_sel,
+                        config_visual=config_visual  # <--- Passamos a configuração aqui
+                    )
                     
                     nome_arquivo = f"Horario_{esc_sel.replace(' ', '_')}_{dia_sel}.pdf"
                     st.download_button(
@@ -2644,7 +2669,6 @@ with t8:
                         file_name=nome_arquivo,
                         mime='application/pdf'
                     )
-
         # --- 3. VISUALIZAÇÃO NA TELA (SEU CÓDIGO ORIGINAL MANTIDO) ---
         df_view = dh[dh['ESCOLA'] == esc_sel].copy()
         dias_para_mostrar = [dia_sel] if dia_sel != "Todos os Dias" else DIAS_SEMANA
