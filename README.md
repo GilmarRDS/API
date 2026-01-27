@@ -86,10 +86,18 @@ client_id = "seu-client-id"
 # ... outros campos do JSON
 Atenção: Nunca compartilhe o arquivo secrets.toml publicamente.
 
+
+### Instalação das Dependências
+
+Para instalar todas as bibliotecas necessárias, execute:
+
+pip install -r requirements.txt
+
+### Atualizar/Instalar Dependências
+pip install --upgrade -r requirements.txt
+
 ▶️ Como Executar
 No terminal, execute:
-
-Bash
 
 streamlit run app.py
 python -m streamlit run app.py
