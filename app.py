@@ -973,14 +973,15 @@ except Exception as e:
     dch = pd.DataFrame(columns=COLS_PADRAO["CH"])
     dpl = pd.DataFrame(columns=COLS_PADRAO["Horario"]) # dpl definido aqui!
 # ==========================================
-# 8. LEITURA DE DADOS (CACHE)
+# ==========================================
+# 8. LEITURA DE DADOS (CACHE) - VERSÃO ANTI-BLOQUEIO (429)
 # ==========================================
 @st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False, max_entries=1)
 def carregar_banco():
     """
-    Carrega todos os dados do Google Sheets, incluindo a nova tabela de Carga Horária (CH).
+    Carrega todos os dados do Google Sheets com pausas estratégicas para evitar erro 429 (Quota Exceeded).
     """
-    with st.spinner("🔄 Carregando sistema..."):
+    with st.spinner("🔄 Carregando sistema (com pausas de segurança)..."):
         # Se não houver conexão, retorna 7 dataframes vazios
         if gs_client is None or not PLANILHA_ID:
             empty_dfs = [pd.DataFrame() for _ in range(7)]
@@ -989,13 +990,17 @@ def carregar_banco():
         try:
             # 1. Ler Turmas
             t, ok_t = ler_aba_gsheets("Turmas", COLS_PADRAO["Turmas"])
+            time.sleep(1.5) # <--- PAUSA DE SEGURANÇA
             
             # 2. Ler Curriculo
             c, ok_c = ler_aba_gsheets("Curriculo", COLS_PADRAO["Curriculo"])
+            time.sleep(1.5) # <--- PAUSA DE SEGURANÇA
             
             # 3. Ler Professores (combinando abas)
             p_ef, ok_ef = ler_aba_gsheets("ProfessoresEF", COLS_PADRAO["Professores"])
+            time.sleep(1.0) 
             p_dt, ok_dt = ler_aba_gsheets("ProfessoresDT", COLS_PADRAO["Professores"])
+            time.sleep(1.5) # <--- PAUSA DE SEGURANÇA
             
             if ok_ef and ok_dt:
                 p = pd.concat([p_ef, p_dt], ignore_index=True)
@@ -1011,54 +1016,48 @@ def carregar_banco():
             
             # 4. Ler ConfigDias e Agrupamentos
             d, ok_d = ler_aba_gsheets("ConfigDias", COLS_PADRAO["ConfigDias"])
+            time.sleep(1.0)
             r, ok_r = ler_aba_gsheets("Agrupamentos", COLS_PADRAO["Agrupamentos"])
+            time.sleep(1.0)
             
             # 5. Ler Horario (opcional)
             h, ok_h = ler_aba_gsheets("Horario", COLS_PADRAO["Horario"])
-            if not ok_h:
-                h = pd.DataFrame()
+            if not ok_h: h = pd.DataFrame()
+            time.sleep(1.0)
 
-            # 6. Ler Tabela CH (NOVA PARTE CORRIGIDA)
+            # 6. Ler Tabela CH
             ch_df, ok_ch = ler_aba_gsheets("CH", COLS_PADRAO["CH"])
-            
-            # Se a aba não existir ou estiver vazia, gera o padrão do código
+            time.sleep(1.0)
             if not ok_ch or ch_df.empty:
                 from ch import gerar_dataframe_ch
                 ch_df = gerar_dataframe_ch()
             
+            # 7. Ler HorarioPL (NOVA)
+            pl, ok_pl = ler_aba_gsheets("HorarioPL", COLS_PADRAO["Horario"])
+            if not ok_pl: pl = pd.DataFrame()
+
             # Verificar se tudo essencial carregou
             sucesso = ok_t and ok_c and ok_p and ok_d and ok_r
             
-            # Retorna os 7 DataFrames + Status
-            return t, c, p, d, r, h, ch_df, sucesso
+            # Retorna os 8 DataFrames + Status (Note que adicionei 'pl' no final)
+            return t, c, p, d, r, h, ch_df, pl, sucesso
             
         except Exception as e:
             st.cache_data.clear()
             error_msg = str(e)
-            st.error(f"❌ Erro ao carregar dados: {error_msg}")
+            if '429' in error_msg:
+                st.warning("⚠️ O sistema está lendo muito rápido. Aguarde 1 minuto e recarregue a página.")
+            else:
+                st.error(f"❌ Erro ao carregar dados: {error_msg}")
             
-            # Retorna vazios em caso de erro
-            empty_dfs = [pd.DataFrame() for _ in range(7)]
+            # Retorna vazios em caso de erro (8 dataframes agora)
+            empty_dfs = [pd.DataFrame() for _ in range(8)]
             return (*empty_dfs, False)
-
-# Carregar dados com tratamento de erro robusto
-try:
-    # Note a variável 'dch' adicionada aqui ⬇️
-    dt, dc, dp, dd, da, dh, dch, sistema_seguro = carregar_banco()
-except Exception as e:
-    st.error(f"❌ Erro crítico ao inicializar sistema: {str(e)}")
-    st.info("💡 **Tente:**\n"
-            "1. Clique no botão '🚨 Reset Sistema' acima\n"
-            "2. Recarregue a página completamente (Ctrl+F5)\n"
-            "3. Verifique sua conexão com a internet\n"
-            "4. Confirme se as credenciais estão corretas no secrets.toml")
-    # Forçar parada se houver erro crítico
-    st.stop()
 
 # ==========================================
 # 9. FUNÇÕES DE SALVAR
 # ==========================================
-def salvar_seguro(dt, dc, dp, dd, da, dh=None):
+def salvar_seguro(dt, dc, dp, dd, da, dh=None, dpl=None):
     """Salva todos os dados no Google Sheets com rate limiting"""
     try:
         with st.status("💾 Salvando...", expanded=True) as status:
@@ -1119,6 +1118,12 @@ def salvar_seguro(dt, dc, dp, dd, da, dh=None):
             if dh is not None:
                 status.write("📝 Salvando Horário...")
                 if not escrever_aba_gsheets("Horario", dh.fillna("")):
+                    return
+                time.sleep(0.5)
+
+            if dpl is not None:
+                status.write("📝 Salvando Horário PL...")
+                if not escrever_aba_gsheets("HorarioPL", dpl.fillna("")):
                     return
                 time.sleep(0.5)
             
@@ -3039,157 +3044,177 @@ with t9:
                             time.sleep(1)
                             st.rerun()
 # ==========================================
-# ABA 10: GESTÃO DE PL (CORRIGIDA)
+# ABA 10: GESTÃO DE PL (POR COMPONENTE) - FINAL
 # ==========================================
 with t10:
-    st.markdown("### 📘 Gestão de PL (Planejamento)")
+    st.markdown("### 📘 Gestão de PL (Planejamento por Área)")
+    st.caption("Selecione o componente para visualizar e marcar o PL dos professores.")
     
-    if dt.empty: 
-        st.warning("⚠️ Carregue dados na aba Turmas primeiro.")
+    if dt.empty or dp.empty: 
+        st.warning("⚠️ Carregue Turmas e Professores primeiro.")
     else:
         # --- 1. FILTROS ---
         c1, c2, c3, c4 = st.columns(4)
         with c1: 
-            e_pl = st.selectbox("Escola", sorted(dt['ESCOLA'].unique()), key="pl_e_v3")
+            e_pl = st.selectbox("Escola", sorted(dt['ESCOLA'].unique()), key="pl_e_comp")
         with c2: 
-            d_pl = st.selectbox("Dia", DIAS_SEMANA, key="pl_d_v3")
+            d_pl = st.selectbox("Dia", DIAS_SEMANA, key="pl_d_comp")
         with c3: 
             trns = dt[dt['ESCOLA'] == e_pl]['TURNO'].unique()
-            t_pl = st.selectbox("Turno", sorted(trns), key="pl_t_v3") if len(trns) > 0 else None
+            t_pl = st.selectbox("Turno", sorted(trns), key="pl_t_comp") if len(trns) > 0 else None
         with c4: 
-            # Lista de Matérias para o Filtro
-            f_pl = st.selectbox("Filtrar Profs", ["Todos"] + MATERIAS_ESPECIALISTAS, key="pl_f_v3")
+            f_pl = st.selectbox("Selecionar Componente", MATERIAS_ESPECIALISTAS, key="pl_f_comp")
 
-        if t_pl:
+        if t_pl and f_pl:
             st.divider()
             dn = padronizar(d_pl)
-            
-            # --- 2. PREPARAR LISTA DE PROFESSORES (LÓGICA DO FILTRO MELHORADA) ---
-            if f_pl != "Todos":
-                termo_busca = padronizar(f_pl).upper() # Ex: "ARTE"
+            comp_alvo = padronizar_materia_interna(f_pl)
+
+            # --- 2. ENCONTRAR PROFESSORES DO COMPONENTE ---
+            # Filtra apenas quem dá a matéria E trabalha na escola selecionada
+            def valida_prof(row):
+                escolas = [padronizar(e.strip()) for e in str(row['ESCOLAS_ALOCADAS']).split(',')]
+                if padronizar(e_pl) not in escolas: return False
                 
-                def tem_materia_check(texto_componentes):
-                    # Transforma "Arte, História" em "ARTE HISTORIA" e busca
-                    texto_limpo = padronizar(str(texto_componentes)).upper()
-                    return termo_busca in texto_limpo
+                mats = [padronizar_materia_interna(m.strip()) for m in str(row['COMPONENTES']).split(',')]
+                return comp_alvo in mats
 
-                dfp = dp[dp['COMPONENTES'].apply(tem_materia_check)]
-                cods = sorted(dfp['CÓDIGO'].unique().tolist())
-                st.caption(f"🔍 Filtro Ativo: **{len(cods)}** professores encontrados de **{f_pl}**.")
-            else: 
-                cods = sorted(dp['CÓDIGO'].unique().tolist())
+            df_profs_area = dp[dp.apply(valida_prof, axis=1)]
             
-            # Cria lista: ["---", "PL-P1...", "PL-P2..."]
-            ops_pl = ["---"] + [f"PL-{c}" for c in cods]
-
-            # --- 3. LISTAR TURMAS ---
-            turmas = sorted(dt[(dt['ESCOLA'] == e_pl) & (dt['TURNO'] == t_pl)]['TURMA'].unique())
-
-            if not turmas:
-                st.info("🚫 Nenhuma turma encontrada neste turno/escola.")
+            if df_profs_area.empty:
+                st.info(f"🚫 Nenhum professor de {f_pl} alocado na escola {e_pl}.")
             else:
-                # --- 4. CARREGAR DADOS ---
-                h_aula = {} # Aulas (Travado)
+                profs_lista = df_profs_area.to_dict('records')
+                st.success(f"👥 Exibindo **{len(profs_lista)}** professores de **{f_pl}**")
+
+                # --- 3. MAPEAMENTO DE AULAS (TRAVAMENTO) ---
+                # Verifica onde os professores já estão dando aula NESTA escola/dia/turno
+                ocupacao_aula = {}
                 if not dh.empty:
                     msk = (dh['ESCOLA'] == e_pl) & (dh['TURNO'] == t_pl) & (dh['DIA'].apply(padronizar) == dn)
-                    for _, r in dh[msk].iterrows(): 
-                        h_aula[r['TURMA']] = {s: r[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
-                
-                h_pl_cur = {} # PLs (Editável)
-                if not dpl.empty:
-                    msk = (dpl['ESCOLA'] == e_pl) & (dpl['TURNO'] == t_pl) & (dpl['DIA'].apply(padronizar) == dn)
-                    for _, r in dpl[msk].iterrows(): 
-                        h_pl_cur[r['TURMA']] = {s: r[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
+                    for _, row in dh[msk].iterrows():
+                        turma_aula = row['TURMA']
+                        for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                            p_cod = row[s]
+                            # Se tiver código, salva como ocupado
+                            if p_cod and p_cod != "---":
+                                if p_cod not in ocupacao_aula: ocupacao_aula[p_cod] = {}
+                                ocupacao_aula[p_cod][s] = turma_aula
 
-                # Prepara conflitos (Outras escolas)
-                c_aula = pd.DataFrame(); c_pl = pd.DataFrame()
-                if not dh.empty:
-                    msk = (dh['DIA'].apply(padronizar) == dn) & (dh['TURNO'] == t_pl)
-                    c_aula = dh[msk & (dh['ESCOLA'] != e_pl)]
+                # --- 4. CARREGAR PLs JÁ SALVOS NO BANCO ---
+                mapa_pl_salvo = {}
                 if not dpl.empty:
-                    msk = (dpl['DIA'].apply(padronizar) == dn) & (dpl['TURNO'] == t_pl)
-                    c_pl = dpl[msk & (dpl['ESCOLA'] != e_pl)]
+                    msk_pl = (dpl['ESCOLA'] == e_pl) & (dpl['TURNO'] == t_pl) & (dpl['DIA'].apply(padronizar) == dn)
+                    for _, row in dpl[msk_pl].iterrows():
+                        # A chave no banco é "PL - NOME DO PROFESSOR"
+                        chave_linha = row['TURMA'] 
+                        if chave_linha.startswith("PL - "):
+                             mapa_pl_salvo[chave_linha] = {s: row[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
 
-                choices_pl = {}
-                
-                # --- 5. RENDERIZAR GRID ---
-                cols = st.columns(3)
-                for i, t in enumerate(turmas):
-                    with cols[i % 3]:
-                        st.markdown(f'<div class="turma-card-moldura" style="background:#f0f8ff; padding:8px;"><div class="turma-titulo">{t}</div>', unsafe_allow_html=True)
-                        
-                        for sl in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                            va = h_aula.get(t, {}).get(sl, "---")      # Valor Aula
-                            vp = h_pl_cur.get(t, {}).get(sl, "---")    # Valor PL
+                # Dicionário para guardar as novas escolhas (para salvar depois)
+                novos_pls = {}
+
+                # --- 5. RENDERIZAR GRID (LINHAS = PROFESSORES) ---
+                # Cabeçalho
+                cols_head = st.columns([2, 1, 1, 1, 1, 1])
+                cols_head[0].markdown("**Professor**")
+                for i, s in enumerate(["1ª", "2ª", "3ª", "4ª", "5ª"]):
+                    cols_head[i+1].markdown(f"**{s}**")
+                st.divider()
+
+                for p in profs_lista:
+                    cod = p['CÓDIGO']
+                    nome = p['NOME']
+                    nome_linha_pl = f"PL - {nome}" # Chave para salvar no banco
+                    
+                    est = gerar_estilo_professor_dinamico(cod)
+                    
+                    cols = st.columns([2, 1, 1, 1, 1, 1])
+                    
+                    # Coluna do Nome
+                    cols[0].markdown(f"""
+                    <div style="border-left: 5px solid {est['bg']}; padding-left: 5px;">
+                        <div style="font-weight:bold; font-size:0.9em;">{nome}</div>
+                        <div style="font-size:0.75em; color:#555;">{cod}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    for i, slot in enumerate(["1ª", "2ª", "3ª", "4ª", "5ª"]):
+                        with cols[i+1]:
+                            # A) Verifica se tem AULA (Prioridade Máxima - Travado)
+                            turma_ocupada = ocupacao_aula.get(cod, {}).get(slot)
                             
-                            c_l, c_s = st.columns([1, 4])
-                            c_l.write(sl)
+                            if turma_ocupada:
+                                st.markdown(f"""
+                                <div style="background-color:#eee; border:1px solid #ccc; border-radius:4px; padding:6px; text-align:center;">
+                                    <div style="font-size:0.7em; font-weight:bold; color:#888;">AULA</div>
+                                    <div style="font-size:0.7em; color:#333;">{turma_ocupada}</div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                novos_pls[(nome_linha_pl, slot)] = "---"
                             
-                            # LÓGICA DE EXIBIÇÃO:
-                            # 1. Se tem AULA (va não é "---"), mostra TRAVADO.
-                            if va != "---" and va:
-                                est = gerar_estilo_professor_dinamico(va)
-                                c_s.markdown(f'<div style="background:{est["bg"]}; color:{est["text"]}; border:1px solid {est["border"]}; padding:4px; text-align:center; font-size:11px; opacity:0.6;" title="Aula Normal (Vá na Aba Editor para liberar)">{va}</div>', unsafe_allow_html=True)
-                                choices_pl[(t, sl)] = "---" 
-                            
-                            # 2. Se está LIVRE, mostra o SELECTBOX para inserir PL
                             else:
-                                # Garante que o valor atual esteja na lista (caso o filtro mude)
-                                op_locais = ops_pl.copy()
-                                if vp not in op_locais: op_locais.append(vp)
+                                # B) Se livre, verifica se já tem PL salvo ou usuário marcou
+                                val_banco = mapa_pl_salvo.get(nome_linha_pl, {}).get(slot, "---")
                                 
-                                idx = op_locais.index(vp) if vp in op_locais else 0
-                                sel = c_s.selectbox("", op_locais, index=idx, key=f"pl_sel_v3_{t}_{sl}", label_visibility="collapsed")
+                                # Verifica se é PL (formato PL-CODIGO)
+                                is_pl_checked = str(val_banco).startswith("PL-")
                                 
-                                if sel != "---":
-                                    id_real = extrair_id_real(sel)
-                                    est = gerar_estilo_professor_dinamico(id_real)
-                                    c_s.markdown(f'<div style="background:{est["bg"]}; color:{est["text"]}; font-size:10px; text-align:center; border-radius:3px; margin-top:-10px; border: 1px dashed #333;">{sel}</div>', unsafe_allow_html=True)
+                                # Checkbox
+                                key_chk = f"chk_{cod}_{slot}_{dn}"
+                                checked = st.checkbox("PL", value=is_pl_checked, key=key_chk, label_visibility="collapsed")
                                 
-                                choices_pl[(t, sl)] = sel
-                            
-                            if sl == "3ª": st.caption("— RECREIO —")
-                        
-                        st.markdown('</div>', unsafe_allow_html=True)
+                                if checked:
+                                    # --- AQUI ESTÁ A MÁGICA ---
+                                    # Salva como PL-CODIGO (Ex: PL-P1EPEDFI)
+                                    codigo_pl = f"PL-{cod}"
+                                    
+                                    # Mostra visualmente bonito
+                                    st.markdown(f"""
+                                    <div style="text-align:center; margin-top:-18px;">
+                                        <span style="background-color:{est['bg']}; color:{est['text']}; padding:3px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;">
+                                            PL
+                                        </span>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    novos_pls[(nome_linha_pl, slot)] = codigo_pl
+                                else:
+                                    st.markdown('<div style="text-align:center; margin-top:-18px; color:#ddd;">—</div>', unsafe_allow_html=True)
+                                    novos_pls[(nome_linha_pl, slot)] = "---"
 
-                # --- 6. BOTÃO DE SALVAR ---
-                if st.button("💾 Salvar PLs (Banco HorarioPL)", type="primary", use_container_width=True):
-                    err = []
-                    for (t, s), v in choices_pl.items():
-                        if v == "---": continue
-                        idp = extrair_id_real(v)
-                        
-                        # Valida Conflitos
-                        if not c_aula.empty:
-                            cf = c_aula[c_aula[s].apply(extrair_id_real) == idp]
-                            for _, r in cf.iterrows(): err.append(f"⛔ {idp} tem AULA em {r['ESCOLA']} ({s})")
-                        
-                        if not c_pl.empty:
-                            cf = c_pl[c_pl[s].apply(extrair_id_real) == idp]
-                            for _, r in cf.iterrows(): err.append(f"⛔ {idp} já tem PL em {r['ESCOLA']} ({s})")
-                        
-                        # Duplicidade Local
-                        k = 0
-                        for t2 in turmas:
-                            if extrair_id_real(choices_pl.get((t2, s))) == idp: k += 1
-                        if k > 1: err.append(f"⛔ {idp} alocado 2x para PL na {s} aula (mesma escola).")
+                    st.markdown("---")
 
-                    if err:
-                        for e in set(err): st.error(e)
-                    else:
-                        with st.spinner("Gravando..."):
-                            new = []
-                            for t in turmas:
-                                l = {"ESCOLA": e_pl, "TURMA": t, "TURNO": t_pl, "DIA": d_pl}
-                                for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]: l[s] = choices_pl.get((t, s), "---")
-                                new.append(l)
-                            
-                            if not dpl.empty:
-                                msk_rm = (dpl['ESCOLA'] == e_pl) & (dpl['TURNO'] == t_pl) & (dpl['DIA'].apply(padronizar) == dn)
-                                dpl = dpl[~msk_rm]
-                            
-                            dpl = pd.concat([dpl, pd.DataFrame(new)], ignore_index=True)
-                            salvar_seguro(dt, dc, dp, dd, da, dh, dpl)
-                            st.success("✅ PLs Salvos com sucesso!")
-                            time.sleep(1)
-                            st.rerun()
+                # --- 6. SALVAR ---
+                if st.button("💾 Salvar Alterações de PL", type="primary"):
+                    with st.spinner("Salvando..."):
+                        
+                        # Prepara dados para o formato do banco
+                        dados_para_salvar = {} # {nome_linha: {slot: valor}}
+
+                        for (nm, sl), val in novos_pls.items():
+                            if nm not in dados_para_salvar:
+                                dados_para_salvar[nm] = {
+                                    "ESCOLA": e_pl, "TURMA": nm, "TURNO": t_pl, "DIA": d_pl,
+                                    "1ª": "---", "2ª": "---", "3ª": "---", "4ª": "---", "5ª": "---"
+                                }
+                            dados_para_salvar[nm][sl] = val
+                        
+                        # Limpa dados antigos dessa visualização no banco
+                        if not dpl.empty:
+                            profs_na_tela = list(dados_para_salvar.keys())
+                            # Remove linhas desses professores nesta escola/dia/turno para evitar duplicata
+                            mask_remove = (dpl['ESCOLA'] == e_pl) & \
+                                          (dpl['TURNO'] == t_pl) & \
+                                          (dpl['DIA'].apply(padronizar) == dn) & \
+                                          (dpl['TURMA'].isin(profs_na_tela))
+                            dpl = dpl[~mask_remove]
+                        
+                        # Adiciona novos dados
+                        if dados_para_salvar:
+                            df_new = pd.DataFrame(list(dados_para_salvar.values()))
+                            dpl = pd.concat([dpl, df_new], ignore_index=True)
+                        
+                        salvar_seguro(dt, dc, dp, dd, da, dh, dpl)
+                        st.success("✅ Planejamento atualizado com formato PL-CODIGO!")
+                        time.sleep(1)
+                        st.rerun()
