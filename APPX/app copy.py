@@ -41,7 +41,21 @@ from regras_alocacao import (
 )
 
 # ==========================================
-# 1. CONFIGURAÇÕES & ESTILO
+# 1. FUNÇÕES UTILITÁRIAS 
+# ==========================================
+
+def extrair_id_real(codigo_sujo):
+    """
+    Remove o prefixo 'PL-' e espaços extras.
+    Ex: 'PL-P1DTARTE ' -> 'P1DTARTE'
+    """
+    if not codigo_sujo or codigo_sujo == "---": 
+        return "---"
+    s = str(codigo_sujo).upper().strip()
+    s = s.replace("PL-", "")
+    return s
+# ==========================================
+# 2. CONFIGURAÇÕES & ESTILO
 # ==========================================
 st.set_page_config(page_title="Gerador Escolar Pro", page_icon="🎓", layout="wide")
 
@@ -96,7 +110,7 @@ st.markdown("""
 
 
 # ==========================================
-# FUNÇÕES DE GERAÇÃO DE CORES DINÂMICAS
+# 3 FUNÇÕES DE GERAÇÃO DE CORES DINÂMICAS
 # ==========================================
 
 def get_contrast_text_color(hex_bg_color):
@@ -1372,7 +1386,7 @@ t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
 ])
 
 # ==========================================
-# RESTANTE DO CÓDIGO DAS ABAS (MANTENHA O MESMO)
+# 13 ABAS DA APLICAÇÃO
 # ==========================================
 # ABA 1: DASHBOARD
 with t1:
@@ -1499,8 +1513,6 @@ with t4:
                 dt = pd.concat([dt, pd.DataFrame([{"ESCOLA": padronizar(e), "TURMA": padronizar(t), "TURNO": tn, "SÉRIE/ANO": an, "REGIÃO": rg, "NÍVEL": nv}])], ignore_index=True); salvar_seguro(dt, dc, dp, dd, da)
     dt = st.data_editor(dt, num_rows="dynamic", key="edt")
     botao_salvar("Salvar Turmas", "btur")
-
-# ABA 5: PROFESSORES (MANTENHA O MESMO CÓDIGO)
 
 # ABA 5: PROFESSORES
 with t5:
@@ -1630,8 +1642,6 @@ with t5:
     dp = st.data_editor(dp, num_rows="dynamic", key="edp", use_container_width=True)
     botao_salvar("Salvar Alterações na Tabela", "bprof")
 
-
-# ABA 6: VAGAS - Gerador de Possibilidades
 # ABA 6: VAGAS - Gerador de Possibilidades
 with t6:
     st.markdown("### 💼 Gerador de Vagas - Planejamento de Equipe")
@@ -1854,7 +1864,7 @@ with t6:
                 else:
                     st.warning("Nenhuma demanda de especialistas encontrada para analisar.")
 
-# ABA 7: GERADOR (MANTENHA O MESMO CÓDIGO)
+# ABA 7: GERADOR 
 with t7:
     if sistema_seguro:
         st.subheader("🔍 Depuração da Demanda")

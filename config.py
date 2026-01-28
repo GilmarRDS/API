@@ -37,7 +37,8 @@ TURNOS = ["MATUTINO", "VESPERTINO", "AMBOS"]
 VINCULOS = ["DT", "EFETIVO"]
 
 
-# Colunas padrão esperadas em cada aba
+# No arquivo config.py
+
 COLS_PADRAO = {
     "Turmas": ["ESCOLA", "NÍVEL", "TURMA", "TURNO", "SÉRIE/ANO", "REGIÃO"],
     "Curriculo": ["SÉRIE/ANO", "COMPONENTE", "QTD_AULAS"],
@@ -47,10 +48,13 @@ COLS_PADRAO = {
     ],
     "ConfigDias": ["SÉRIE/ANO", "DIA_PLANEJAMENTO"],
     "Agrupamentos": ["NOME_ROTA", "LISTA_ESCOLAS"],
-    "Horario": ["ESCOLA", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"],
-    "CH": ["HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"] # <--- NOVA ABA
+    
+    # --- ATUALIZE AQUI ---
+    # Adicionamos "COMPONENTE" na lista de colunas esperadas
+    "Horario": ["ESCOLA", "COMPONENTE", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"],
+    
+    "CH": ["HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"]
 }
-
 # Configurações de carga horária padrão
 CARGA_MINIMA_PADRAO = 14
 CARGA_MAXIMA_PADRAO = 30
