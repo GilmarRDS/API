@@ -41,17 +41,19 @@ VINCULOS = ["DT", "EFETIVO"]
 
 COLS_PADRAO = {
     "Turmas": ["ESCOLA", "NÍVEL", "TURMA", "TURNO", "SÉRIE/ANO", "REGIÃO"],
+    
     "Curriculo": ["SÉRIE/ANO", "COMPONENTE", "QTD_AULAS"],
+    
     "Professores": [
         "CÓDIGO", "NOME", "COMPONENTES", "CARGA_HORÁRIA",
         "REGIÃO", "VÍNCULO", "TURNO_FIXO", "ESCOLAS_ALOCADAS", "QTD_PL"
     ],
+    
     "ConfigDias": ["SÉRIE/ANO", "DIA_PLANEJAMENTO"],
+    
     "Agrupamentos": ["NOME_ROTA", "LISTA_ESCOLAS"],
     
-    # --- ATUALIZE AQUI ---
-    # Adicionamos "COMPONENTE" na lista de colunas esperadas
-    "Horario": ["ESCOLA", "COMPONENTE", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"],
+    "Horario": ["ESCOLA", "COMPONENTE", "PROFESSOR", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"],
     
     "CH": ["HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"]
 }

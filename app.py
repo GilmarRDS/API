@@ -3062,7 +3062,7 @@ with t9:
                             time.sleep(1)
                             st.rerun()
 # ==========================================
-# ABA 10: GESTÃO DE PL (FINAL - LEITURA DIRETA DA MEMÓRIA)
+# ABA 10: GESTÃO DE PL (FINAL - LIMPEZA UNIVERSAL)
 # ==========================================
 with t10:
     st.markdown("### 📘 Gestão de PL (Planejamento por Área)")
@@ -3072,12 +3072,12 @@ with t10:
     else:
         # --- 1. FILTROS ---
         c1, c2, c3, c4 = st.columns(4)
-        with c1: e_pl = st.selectbox("Escola", sorted(dt['ESCOLA'].unique()), key="pl_e_v7")
-        with c2: d_pl = st.selectbox("Dia", DIAS_SEMANA, key="pl_d_v7")
+        with c1: e_pl = st.selectbox("Escola", sorted(dt['ESCOLA'].unique()), key="pl_e_fix_uni")
+        with c2: d_pl = st.selectbox("Dia", DIAS_SEMANA, key="pl_d_fix_uni")
         with c3: 
             trns = dt[dt['ESCOLA'] == e_pl]['TURNO'].unique()
-            t_pl = st.selectbox("Turno", sorted(trns), key="pl_t_v7") if len(trns) > 0 else None
-        with c4: f_pl = st.selectbox("Componente", MATERIAS_ESPECIALISTAS, key="pl_f_v7")
+            t_pl = st.selectbox("Turno", sorted(trns), key="pl_t_fix_uni") if len(trns) > 0 else None
+        with c4: f_pl = st.selectbox("Componente", MATERIAS_ESPECIALISTAS, key="pl_f_fix_uni")
 
         if t_pl and f_pl:
             st.divider()
@@ -3101,7 +3101,7 @@ with t10:
                 # --- 3. MAPEAMENTO (AULAS + PL EXISTENTE) ---
                 ocupacao_aula = {}
                 
-                # Aulas (dh) - Verifica onde ele dá aula
+                # Aulas (dh)
                 if not dh.empty:
                     msk = (dh['TURNO'] == t_pl) & (dh['DIA'].apply(padronizar) == dn)
                     for _, row in dh[msk].iterrows():
@@ -3115,13 +3115,24 @@ with t10:
                                 if cid not in ocupacao_aula: ocupacao_aula[cid] = {}
                                 ocupacao_aula[cid][s] = aviso
 
-                # PLs (dpl) - Carrega o que já está no banco para preencher os checkbox
+                # PLs (dpl) - LEITURA INTELIGENTE (Corrige o problema de "não aparecer")
                 mapa_pl_salvo = {} 
                 if not dpl.empty:
                     msk_pl = (dpl['ESCOLA'] == e_pl) & (dpl['TURNO'] == t_pl) & (dpl['DIA'].apply(padronizar) == dn)
-                    for _, r in dpl[msk_pl].iterrows():
-                        chave = str(r['TURMA']).strip() 
-                        mapa_pl_salvo[chave] = {s: r[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
+                    df_pl_filt = dpl[msk_pl]
+                    
+                    for _, r in df_pl_filt.iterrows():
+                        # Normaliza o nome que está no banco (Remove "PL - " se existir)
+                        p_banco = str(r.get('PROFESSOR', '')).replace("PL - ", "").strip()
+                        t_banco = str(r.get('TURMA', '')).replace("PL - ", "").strip()
+                        
+                        # Tenta usar a coluna PROFESSOR, se falhar usa TURMA
+                        chave = p_banco if p_banco else t_banco
+                        
+                        if chave:
+                            # Padroniza para garantir o match
+                            chave_norm = padronizar(chave)
+                            mapa_pl_salvo[chave_norm] = {s: r[s] for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]}
 
                 # --- 4. RENDERIZAR GRID ---
                 cols_head = st.columns([2, 1, 1, 1, 1, 1])
@@ -3129,35 +3140,35 @@ with t10:
                 for i, s in enumerate(["1ª", "2ª", "3ª", "4ª", "5ª"]): cols_head[i+1].markdown(f"**{s}**")
                 st.divider()
 
-                # Dicionário para rastrear as chaves dos widgets gerados
-                chaves_widgets = {} # { (id_prof, slot): chave_st_session }
+                chaves_widgets = {} 
 
                 for p in profs_lista:
                     cod_orig = p['CÓDIGO']
                     cod_limpo = extrair_id_real(cod_orig)
-                    nome = str(p['NOME']).strip()
-                    chave_linha = f"PL - {nome}"
+                    nome_real = str(p['NOME']).strip()
+                    nome_busca = padronizar(nome_real) # Chave para buscar no mapa carregado
                     
                     est = gerar_estilo_professor_dinamico(cod_orig)
                     cols = st.columns([2, 1, 1, 1, 1, 1])
-                    cols[0].markdown(f"<div style='border-left:5px solid {est['bg']}; padding-left:5px;'><b>{nome}</b><br><small>{cod_orig}</small></div>", unsafe_allow_html=True)
+                    
+                    # Coluna 1
+                    cols[0].markdown(f"<div style='border-left:5px solid {est['bg']}; padding-left:5px;'><b>{nome_real}</b><br><small>{cod_orig}</small></div>", unsafe_allow_html=True)
                     
                     for i, slot in enumerate(["1ª", "2ª", "3ª", "4ª", "5ª"]):
                         with cols[i+1]:
-                            # 1. AULA (Prioridade)
+                            # 1. AULA
                             info_aula = ocupacao_aula.get(cod_limpo, {}).get(slot)
                             if info_aula:
                                 st.markdown(f"<div style='background:#eee; padding:5px; text-align:center; font-size:0.7em; color:#555;'>AULA<br><b>{info_aula}</b></div>", unsafe_allow_html=True)
                             else:
                                 # 2. PL CHECKBOX
-                                val_banco = mapa_pl_salvo.get(chave_linha, {}).get(slot, "")
+                                # Busca inteligente: ignora se no banco está "PL - JOAO" ou só "JOAO"
+                                val_banco = mapa_pl_salvo.get(nome_busca, {}).get(slot, "")
                                 ja_tem_pl = str(val_banco).startswith("PL-")
                                 
-                                # GERA UMA CHAVE ÚNICA E GUARDA ELA
-                                k_chk = f"chk_pl_v7_{cod_limpo}_{slot}_{dn}_{t_pl}"
+                                k_chk = f"chk_pl_uni_{cod_limpo}_{slot}_{dn}_{t_pl}"
                                 chaves_widgets[(cod_orig, slot)] = k_chk 
                                 
-                                # Renderiza o checkbox conectado à memória
                                 checked = st.checkbox("PL", value=ja_tem_pl, key=k_chk, label_visibility="collapsed")
                                 
                                 if checked:
@@ -3166,75 +3177,81 @@ with t10:
                                     st.markdown("<div style='text-align:center; margin-top:-18px; color:#ddd;'>-</div>", unsafe_allow_html=True)
                     st.markdown("---")
 
-                # --- 5. SALVAMENTO (LÊ DA MEMÓRIA, NÃO DA TELA) ---
+                # --- 5. SALVAMENTO (LIMPEZA AGRESSIVA) ---
                 if st.button("💾 GRAVAR ALTERAÇÕES", type="primary", use_container_width=True):
                     with st.status("Processando...", expanded=True) as status:
                         
                         lista_novos = []
-                        professores_na_tela = set() 
+                        nomes_para_limpar = set() # Nomes padronizados para busca no banco
                         contagem_pl = 0
 
-                        # RECONSTRÓI OS DADOS ITERANDO SOBRE A LISTA DE PROFESSORES
-                        # Isso garante que NENHUM professor seja esquecido, mesmo se não tiver checkbox
                         for p in profs_lista:
                             cod_orig = p['CÓDIGO']
-                            cod_limpo = extrair_id_real(cod_orig)
-                            nome = str(p['NOME']).strip()
-                            chave_linha = f"PL - {nome}"
-                            professores_na_tela.add(chave_linha)
+                            nome_prof = str(p['NOME']).strip()
                             
-                            # Linha Base
+                            # Adiciona o nome à lista de "Alvos para apagar"
+                            # Vamos apagar qualquer coisa que pareça com esse nome no banco
+                            nomes_para_limpar.add(padronizar(nome_prof))
+                            
                             row = {
                                 "ESCOLA": e_pl,
                                 "COMPONENTE": f_pl,
-                                "TURMA": chave_linha,
+                                "PROFESSOR": nome_prof, # Salva limpo: "JOAO"
+                                "TURMA": "PL",          # Salva fixo: "PL"
                                 "TURNO": t_pl,
                                 "DIA": d_pl
                             }
                             
-                            # Verifica cada slot
-                            tem_algo = False
+                            tem_pl = False
                             for s in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
-                                # 1. Tem aula? (Lê do dicionário calculado antes)
-                                info_aula = ocupacao_aula.get(cod_limpo, {}).get(s)
-                                
-                                if info_aula:
-                                    row[s] = "---" # Se tem aula, na tabela de PL fica vazio
+                                cod_limpo = extrair_id_real(cod_orig)
+                                if ocupacao_aula.get(cod_limpo, {}).get(s):
+                                    row[s] = "---"
                                 else:
-                                    # 2. Checkbox marcado? (LÊ DIRETO DO SESSION STATE)
                                     k_chk = chaves_widgets.get((cod_orig, s))
                                     if k_chk and st.session_state.get(k_chk, False):
                                         row[s] = f"PL-{cod_orig}"
                                         contagem_pl += 1
-                                        tem_algo = True
+                                        tem_pl = True
                                     else:
                                         row[s] = "---"
                             
-                            # Adiciona a linha (sempre adiciona para garantir que subscreve o antigo)
-                            lista_novos.append(row)
+                            if tem_pl:
+                                lista_novos.append(row)
                         
                         df_novos = pd.DataFrame(lista_novos)
                         
                         status.write(f"📊 Detectados {contagem_pl} marcações de PL.")
 
-                        # LIMPEZA DOS DADOS ANTIGOS (REMOVE FANTASMAS)
                         if not dpl.empty:
-                            status.write("🧹 Removendo dados antigos...")
-                            # Removemos TODAS as entradas dessa escola/dia/turno para OS PROFESSORES DA TELA
-                            # Isso garante que se você desmarcou tudo, os dados antigos somem.
-                            condicao_remover = (
-                                (dpl['ESCOLA'] == e_pl) & 
-                                (dpl['TURNO'] == t_pl) & 
-                                (dpl['DIA'].apply(padronizar) == dn) & 
-                                (dpl['TURMA'].isin(professores_na_tela))
-                            )
-                            dpl = dpl[~condicao_remover]
+                            status.write("🧹 Limpando banco de dados (removendo duplicatas)...")
+                            
+                            # FUNÇÃO DE LIMPEZA INTELIGENTE
+                            # Verifica se o nome no banco (seja na coluna PROFESSOR ou TURMA)
+                            # bate com os professores que estamos editando agora.
+                            def deve_remover(row_banco):
+                                # Se não for da mesma escola/dia/turno, mantém
+                                if row_banco['ESCOLA'] != e_pl or \
+                                   row_banco['TURNO'] != t_pl or \
+                                   padronizar(row_banco['DIA']) != dn:
+                                    return False
+                                
+                                # Verifica o nome
+                                p_val = str(row_banco.get('PROFESSOR', '')).replace("PL - ", "").strip()
+                                t_val = str(row_banco.get('TURMA', '')).replace("PL - ", "").strip()
+                                
+                                # Se o nome bater com alguém da tela, MARCA PARA REMOVER (True)
+                                if padronizar(p_val) in nomes_para_limpar: return True
+                                if padronizar(t_val) in nomes_para_limpar: return True
+                                
+                                return False
 
-                        # INSERÇÃO DOS NOVOS
+                            # Aplica o filtro: Mantém apenas quem NÃO deve ser removido
+                            dpl = dpl[~dpl.apply(deve_remover, axis=1)]
+
                         if not df_novos.empty:
                             dpl = pd.concat([dpl, df_novos], ignore_index=True)
                         
-                        # SALVAR
                         status.write("☁️ Enviando para Google Sheets...")
                         salvar_seguro(dt, dc, dp, dd, da, dh, dpl)
                         
