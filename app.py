@@ -42,7 +42,7 @@ from regras_alocacao import (
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 # AQUI ESTAVA FALTANDO O PageBreak
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether, PageBreak, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.colors import HexColor
 from reportlab.lib.units import mm
@@ -102,7 +102,18 @@ def gerar_pdf_escola(df_horario, nome_escola, dia_filtro="Todos", config_visual=
     titulo_texto = f"Horário Escolar - {nome_escola}"
     if dia_filtro not in ["Todos", "Todos os Dias"]:
         titulo_texto += f" ({dia_filtro})"
-    
+
+    # Adicionar imagem do brasão
+    try:
+        img_path = "img/EMAIL BRASÃO FUNDÃO_QUADRADA.png"
+        img = Image(img_path, width=50*mm, height=50*mm)
+        img.hAlign = 'CENTER'
+        elements.append(img)
+        elements.append(Spacer(1, 5*mm))
+    except:
+        # Se não conseguir carregar a imagem, continua sem ela
+        pass
+
     elements.append(Paragraph(titulo_texto, estilo_titulo))
     elements.append(Spacer(1, 5*mm))
 
@@ -245,6 +256,18 @@ def gerar_pdf_prof_pl(ocupacao_por_dia, map_nome, map_comp, modo_vis, nome_escol
         titulo = f"Horário + PL por Professor - {nome_escola} ({descricao_turno})"
     else:
         titulo = f"Horário + PL por Professor - {nome_escola}"
+
+    # Adicionar imagem do brasão
+    try:
+        img_path = "img/EMAIL BRASÃO FUNDÃO_QUADRADA.png"
+        img = Image(img_path, width=50*mm, height=50*mm)
+        img.hAlign = 'CENTER'
+        elements.append(img)
+        elements.append(Spacer(1, 5*mm))
+    except:
+        # Se não conseguir carregar a imagem, continua sem ela
+        pass
+
     elements.append(Paragraph(titulo, styles["Heading1"]))
     elements.append(Spacer(1, 5 * mm))
 
