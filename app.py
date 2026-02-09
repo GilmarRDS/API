@@ -1989,7 +1989,7 @@ with t1:
         k4.metric("Saldo", saldo, delta_color="normal" if saldo >= 0 else "inverse")
 
         # --- 5. DETETIVE DE CÁLCULOS (ABRA AQUI PARA CONFERIR) ---
-        with st.expander("🕵️‍♀️ Detetive de Cálculos (Clique para ver de onde vêm os números)"):
+        with st.expander("🕵️‍♀️ Detetive de Cálculos (Clique para ver de onde vêm os números)🕵️‍♀️"):
             d1, d2 = st.columns(2)
             with d1:
                 st.markdown("**🔍 Detalhe da Demanda (Turmas)**")
