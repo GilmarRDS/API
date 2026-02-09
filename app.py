@@ -2034,6 +2034,12 @@ with t1:
         st.subheader(f"🎨 Professores Alocados: {filtro_escola}")
         st.caption("Cores de identificação geradas pelo sistema:")
 
+        col_aulas = "Aulas" if "Aulas" in dch.columns else "HORA_ALUNO" if "HORA_ALUNO" in dch.columns else None
+        col_ch = "CH" if "CH" in dch.columns else "TOTAL_HORAS" if "TOTAL_HORAS" in dch.columns else None
+        ch_por_aula = {}
+        if col_aulas and col_ch and not dch.empty:
+            ch_por_aula = pd.Series(dch[col_ch].values, index=dch[col_aulas]).to_dict()
+
         if not df_profs_filt.empty:
             # Ordena para ficar bonito
             df_profs_filt['MAT_PRINCIPAL'] = df_profs_filt['COMPONENTES'].apply(lambda x: str(x).split(',')[0])
@@ -2048,6 +2054,11 @@ with t1:
                 
                 # Gera a cor
                 estilo = gerar_estilo_professor_dinamico(cod)
+                carga_aulas = pd.to_numeric(p.get('CARGA_HORÁRIA'), errors='coerce')
+                carga_ch = None
+                if pd.notna(carga_aulas):
+                    carga_ch = ch_por_aula.get(int(carga_aulas))
+                ch_texto = f"{carga_ch:g}h" if carga_ch is not None and pd.notna(carga_ch) else "—"
                 
                 with cols_vis[idx % 6]:
                     st.markdown(f"""
@@ -2064,6 +2075,7 @@ with t1:
                         <div style="font-weight: 800; font-size: 13px;">{cod}</div>
                         <div style="font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{nome_curto}</div>
                         <div style="font-size: 9px; opacity: 0.9; margin-top: 2px;">{p['COMPONENTES'][:15]}</div>
+                        <div style="font-size: 9px; opacity: 0.85; margin-top: 2px;">CH relógio: {ch_texto}</div>
                     </div>
                     """, unsafe_allow_html=True)
         else:
