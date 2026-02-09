@@ -55,7 +55,7 @@ COLS_PADRAO = {
     
     "Horario": ["ESCOLA", "COMPONENTE", "PROFESSOR", "TURMA", "TURNO", "DIA", "1ª", "2ª", "3ª", "4ª", "5ª"],
     
-    "CH": ["HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"]
+    "CH": ["AULA", "PL", "CH", "AULAS", "HORA_ALUNO", "HORA_PL", "TOTAL_HORAS", "MINUTOS_TOTAL"]
 }
 # Configurações de carga horária padrão
 CARGA_MINIMA_PADRAO = 14

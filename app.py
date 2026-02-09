@@ -2034,6 +2034,94 @@ with t1:
         st.subheader(f"🎨 Professores Alocados: {filtro_escola}")
         st.caption("Cores de identificação geradas pelo sistema:")
 
+        # --- MAPEAMENTO: AULAS -> HORAS RELOGIO (ABA CH) ---
+        def _parse_num(valor):
+            if valor is None or pd.isna(valor):
+                return None
+            if isinstance(valor, (int, float)):
+                return float(valor)
+            s = str(valor).strip().lower()
+            if not s:
+                return None
+            # Formatos tipo "23:30"
+            if ":" in s:
+                partes = s.split(":")
+                if len(partes) == 2 and partes[0].isdigit() and partes[1].isdigit():
+                    return int(partes[0]) + (int(partes[1]) / 60)
+            # Formatos tipo "23h", "23 h", "23h30"
+            m = re.match(r"^\s*(\d+)\s*h(?:\s*(\d+))?\s*$", s)
+            if m:
+                horas = int(m.group(1))
+                mins = int(m.group(2) or 0)
+                return horas + (mins / 60)
+            # Número simples com ponto ou vírgula
+            s = s.replace(",", ".")
+            m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+            if m:
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    return None
+            return None
+
+        def _montar_mapa_aulas_ch(df, aulas_col):
+            mapa = {}
+            for _, row in df.iterrows():
+                aulas_val = _parse_num(row.get(aulas_col))
+                ch_val = _parse_num(row.get("CH"))
+                if aulas_val is None or ch_val is None:
+                    continue
+                if aulas_val <= 0 or ch_val <= 0:
+                    continue
+                mapa[int(aulas_val)] = ch_val
+            return mapa
+
+        def _montar_mapa_hora(df, cols_ch):
+            mapa = {}
+            for _, row in df.iterrows():
+                aulas_val = _parse_num(row.get("HORA_ALUNO"))
+                if aulas_val is None or aulas_val <= 0:
+                    continue
+                if "MINUTOS_TOTAL" in cols_ch:
+                    minutos_val = _parse_num(row.get("MINUTOS_TOTAL"))
+                    if minutos_val is None or minutos_val <= 0:
+                        continue
+                    ch_val = minutos_val / 60
+                elif "TOTAL_HORAS" in cols_ch:
+                    total_aulas = _parse_num(row.get("TOTAL_HORAS"))
+                    if total_aulas is None or total_aulas <= 0:
+                        continue
+                    ch_val = (total_aulas * 50) / 60
+                else:
+                    continue
+                mapa[int(aulas_val)] = ch_val
+            return mapa
+
+        mapa_ch = {}
+        if isinstance(dch, pd.DataFrame) and not dch.empty:
+            cols_ch = set(dch.columns)
+            mapa_aulas = {}
+            mapa_hora = {}
+            if "CH" in cols_ch:
+                if "AULAS" in cols_ch:
+                    mapa_aulas = _montar_mapa_aulas_ch(dch, "AULAS")
+                if not mapa_aulas and "AULA" in cols_ch:
+                    mapa_aulas = _montar_mapa_aulas_ch(dch, "AULA")
+            if "HORA_ALUNO" in cols_ch:
+                mapa_hora = _montar_mapa_hora(dch, cols_ch)
+
+            if mapa_aulas:
+                mapa_ch = mapa_aulas
+            elif mapa_hora:
+                mapa_ch = mapa_hora
+
+        def _formatar_horas(valor):
+            if valor is None:
+                return "-"
+            if abs(valor - int(valor)) < 1e-9:
+                return f"{int(valor)}h"
+            return f"{valor:.2f}h".replace(".", ",")
+
         if not df_profs_filt.empty:
             # Ordena para ficar bonito
             df_profs_filt['MAT_PRINCIPAL'] = df_profs_filt['COMPONENTES'].apply(lambda x: str(x).split(',')[0])
@@ -2048,6 +2136,15 @@ with t1:
                 
                 # Gera a cor
                 estilo = gerar_estilo_professor_dinamico(cod)
+                carga_aulas = p.get('CARGA_HORÁRIA', 0)
+                try:
+                    carga_aulas = int(carga_aulas)
+                except Exception:
+                    carga_aulas = 0
+                horas_relogio = mapa_ch.get(carga_aulas)
+                if horas_relogio is None and carga_aulas:
+                    horas_relogio = (carga_aulas * 50) / 60
+                ch_txt = _formatar_horas(horas_relogio)
                 
                 with cols_vis[idx % 6]:
                     st.markdown(f"""
@@ -2064,6 +2161,7 @@ with t1:
                         <div style="font-weight: 800; font-size: 13px;">{cod}</div>
                         <div style="font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{nome_curto}</div>
                         <div style="font-size: 9px; opacity: 0.9; margin-top: 2px;">{p['COMPONENTES'][:15]}</div>
+                        <div style="font-size: 9px; opacity: 0.9; margin-top: 2px;">CH: {ch_txt}</div>
                     </div>
                     """, unsafe_allow_html=True)
         else:
