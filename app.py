@@ -1177,8 +1177,48 @@ def carregar_banco():
     if ch.empty: ch = gerar_dataframe_ch()
     
     # Carrega PL
-    pl, _ = ler_aba_gsheets("HorarioPL", COLS_PADRAO["Horario"]) 
-    
+    pl, _ = ler_aba_gsheets("HorarioPL", COLS_PADRAO["Horario"])
+
+    # === CALCULAR CARGA HORÁRIA E PL DOS PROFESSORES BASEADO NO HORÁRIO ATUAL ===
+    if not p.empty and (not h.empty or not pl.empty):
+        carga_dict = {}
+        pl_dict = {}
+        escolas_dict = {}
+
+        # Processar Horário (aulas)
+        if not h.empty:
+            for _, row in h.iterrows():
+                for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                    prof = row[slot]
+                    if prof and prof != "---" and not str(prof).startswith("PL-"):
+                        carga_dict[prof] = carga_dict.get(prof, 0) + 1
+                        if prof not in escolas_dict:
+                            escolas_dict[prof] = set()
+                        escolas_dict[prof].add(row['ESCOLA'])
+
+        # Processar PL
+        if not pl.empty:
+            for _, row in pl.iterrows():
+                for slot in ["1ª", "2ª", "3ª", "4ª", "5ª"]:
+                    val = row[slot]
+                    if val and str(val).startswith("PL-"):
+                        prof = extrair_id_real(val)
+                        pl_dict[prof] = pl_dict.get(prof, 0) + 1
+                        if prof not in escolas_dict:
+                            escolas_dict[prof] = set()
+                        escolas_dict[prof].add(row['ESCOLA'])
+
+        # Atualizar DataFrame de Professores
+        for idx, row in p.iterrows():
+            cod = row['CÓDIGO']
+            carga = carga_dict.get(cod, 0)
+            qtd_pl = pl_dict.get(cod, 0)
+            p.at[idx, 'CARGA_HORÁRIA'] = carga
+            p.at[idx, 'QTD_PL'] = qtd_pl
+            escs = escolas_dict.get(cod, set())
+            if escs:
+                p.at[idx, 'ESCOLAS_ALOCADAS'] = ",".join(sorted(escs))
+
     return t, c, p, d, r, h, ch, pl, True
 
 # 3. TERCEIRO: Agora sim, chame a função (bloco try...except)
