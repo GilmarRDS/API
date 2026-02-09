@@ -3189,11 +3189,11 @@ with t9:
 
                 df_profs_ed = dp[dp['COMPONENTES'].apply(tem_materia_ed)]
                 # Lista filtrada + "---"
-                lista_profs = ["---"] + sorted(df_profs_ed['CÓDIGO'].unique().tolist())
+                lista_profs = ["---"] + sorted(df_profs_ed["C\u00D3DIGO"].unique().tolist())
                 st.caption(f"Exibindo apenas professores de: **{filtro_comp_editor}**")
             else:
                 # Lista completa
-                lista_profs = ["---"] + sorted(dp['CÓDIGO'].unique().tolist())
+                lista_profs = ["---"] + sorted(dp["C\u00D3DIGO"].unique().tolist())
 
             # --- 3. IDENTIFICAR TURMAS ---
             df_base_t = dt[(dt['ESCOLA'] == esc_man) & (dt['TURNO'] == turno_man)]
